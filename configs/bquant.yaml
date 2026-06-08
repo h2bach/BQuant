@@ -1,0 +1,51 @@
+# BQuant System Configuration
+
+system:
+  name: BQuant
+  version: 0.1.0
+  environment: development
+  description: Quantitative research and decision-support pipeline for Vietnam stock market
+
+# Project metadata
+project:
+  initial_universe: VN30
+  mvp_frequency: daily
+  initial_data_source: yfinance
+  test_symbols:
+    - FPT
+    - HPG
+    - VCB
+  base_datasets:
+    daily_window_years: 10
+    intraday_window_days: 60
+    intraday_interval: 15m
+    file_layout: one_file_per_symbol
+
+# Storage architecture
+storage:
+  type: duckdb_parquet
+  duckdb_path: warehouse/bquant.duckdb
+  parquet_base_path: data
+  
+  layers:
+    raw: data/raw
+    base: data/base
+    silver: data/silver
+    gold: data/gold
+    marts: data/marts
+    metadata: data/metadata
+
+# Logging configuration
+logging:
+  base_dir: logs
+  data_dir: logs/data
+  pipeline_dir: logs/pipeline
+  error_dir: logs/errors
+  format: jsonl
+  level: INFO
+
+# Execution mode
+execution:
+  mode: local
+  parallel_workers: 4
+  log_all_operations: true

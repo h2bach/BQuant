@@ -1,0 +1,53 @@
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local environments and secrets
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# Editors and OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Runtime data artifacts
+data/**
+!data/
+!data/data_integrity_audit.ipynb
+
+# Runtime logs
+logs/
+
+# Local warehouse state
+warehouse/*.duckdb
+warehouse/*.duckdb.*
+
+# Generated reports
+agent_build_reports/
+
+# Temporary or local scratch files
+tmp/
+temp/
+*.tmp
+*.bak

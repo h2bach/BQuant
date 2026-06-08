@@ -1,0 +1,75 @@
+# Data Sources Configuration for BQuant
+
+# Primary data source for OHLCV
+yfinance:
+  enabled: true
+  name: yfinance
+  type: historical_ohlcv
+  description: Yahoo Finance OHLCV data for Vietnam tickers with .VN suffix
+  package: yfinance
+
+  parameters:
+    daily_interval: 1d
+    intraday_interval: 15m
+    auto_adjust: false
+    repair: false
+    symbol_suffix: ".VN"
+    lookback_years: 10
+    intraday_window_days: 60
+    end_of_day_update_time: "15:00"
+    intraday_update_frequency: 15m
+    delta_storage_mode: separate_file
+    end_of_day_snapshot_time: "15:00"
+
+  rate_limit:
+    requests_per_minute: 120
+    retry_attempts: 3
+    retry_delay_seconds: 3
+
+# Legacy sources kept for fallback experiments only
+vnquant:
+  enabled: false
+  name: vnquant
+  type: historical_ohlcv
+  description: Legacy daily source adapter
+  package: vnquant
+
+vnstock:
+  enabled: false
+  name: vnstock
+  type: historical_ohlcv
+  description: Legacy intraday source adapter
+  package: vnstock
+
+# Index data source (VNIndex, VN30)
+index_data:
+  enabled: true
+  name: vnquant
+  type: index
+  description: Index data for benchmarking
+  
+  indices:
+    - VNIndex
+    - VN30
+
+# Universe data source
+universe:
+  enabled: true
+  name: manual_config
+  type: config_file
+  description: Universe membership from configuration file
+  config_file: configs/universe_vn30.yaml
+
+# News data source (future)
+news:
+  enabled: false
+  name: tbd
+  type: news_feed
+  description: News and reports for NLP features
+
+# Realtime data source (future)
+realtime:
+  enabled: false
+  name: tbd
+  type: realtime_feed
+  description: Realtime market data for intraday analysis

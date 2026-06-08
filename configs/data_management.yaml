@@ -1,0 +1,57 @@
+# Data management rules for the base datasets used by BQuant plotting and monitoring.
+
+datasets:
+  daily_ohlcv_10y:
+    description: Canonical 10-year daily OHLCV store for each VN30 symbol
+    granularity: daily
+    source: yfinance
+    lookback_years: 10
+    refresh_trigger: market_close
+    refresh_time: "15:00"
+    timezone: "Asia/Ho_Chi_Minh"
+    parallel_fetch_workers: 4
+    write_mode: replace_per_symbol
+    file_role: base
+    file_pattern: "{symbol}_{coverage_start}_curr.parquet"
+
+  intraday_ohlcv_15m_60d:
+    description: Canonical 60-day intraday 15m snapshot for each VN30 symbol
+    granularity: intraday
+    interval: 15m
+    source: yfinance
+    lookback_days: 60
+    refresh_trigger: on_demand_snapshot
+    refresh_time: "15:00"
+    timezone: "Asia/Ho_Chi_Minh"
+    parallel_fetch_workers: 2
+    write_mode: replace_per_symbol
+    file_role: base
+    file_pattern: "{symbol}_intra60_{snapshot_date}.parquet"
+
+  intraday_ohlcv_15m_delta:
+    description: Separate intraday file for bars after the base snapshot date until merged
+    granularity: intraday
+    interval: 15m
+    source: yfinance
+    refresh_trigger: intraday_incremental
+    refresh_frequency: "15m"
+    timezone: "Asia/Ho_Chi_Minh"
+    parallel_fetch_workers: 2
+    write_mode: replace_per_symbol
+    file_role: delta
+    merge_policy: merge_after_session_complete
+    file_pattern: "{symbol}_intra_delta_{snapshot_date}.parquet"
+
+manifest:
+  dataset_name: data_file_manifest
+  path: data/metadata/data_file_manifest.parquet
+  freshness:
+    daily_max_lag_days: 1
+    intraday_max_lag_minutes: 30
+  statuses:
+    - up_to_date
+    - stale
+    - awaiting_refresh_window
+    - pending_merge
+    - empty
+    - unknown

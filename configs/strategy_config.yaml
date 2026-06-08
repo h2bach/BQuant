@@ -1,0 +1,132 @@
+# Strategy Configuration for BQuant
+
+# Baseline strategy: Top-K technical score
+strategy:
+  name: top_k_technical
+  description: Select top K symbols by technical score
+  version: 1.0
+
+# Strategy parameters
+parameters:
+  # Number of symbols to hold
+  top_k: 5
+  
+  # Rebalance frequency
+  rebalance_frequency: weekly
+  rebalance_day: friday
+  
+  # Transaction cost
+  transaction_cost: 0.0015  # 0.15% per trade
+  
+  # Weight allocation
+  weight_allocation: equal
+  
+  # Universe
+  universe: VN30
+  
+  # Signal threshold
+  signal_threshold:
+    buy_percentile: 80  # Top 20% as BUY
+    avoid_percentile: 20  # Bottom 20% as AVOID
+
+# Signal generation
+signal_generation:
+  enabled: true
+  
+  # Score weights
+  score_weights:
+    technical_score: 0.45
+    nlp_score: 0.25
+    market_regime_score: 0.15
+    risk_score: -0.15  # Negative weight for risk
+  
+  # Signal labels
+  signals:
+    - BUY
+    - HOLD
+    - AVOID
+  
+  # Signal rules
+  rules:
+    BUY:
+      condition: final_score >= percentile_80
+      description: Strong buy signal
+    
+    HOLD:
+      condition: final_score > percentile_20 and final_score < percentile_80
+      description: Hold current position
+    
+    AVOID:
+      condition: final_score <= percentile_20
+      description: Avoid or reduce position
+
+# Backtesting configuration
+backtesting:
+  enabled: true
+  
+  # Time range
+  start_date: "2023-01-01"
+  end_date: "2025-12-31"
+  
+  # Initial capital
+  initial_capital: 100000000  # 100 million VND
+  
+  # Benchmark
+  benchmark: VN30
+  
+  # Metrics to compute
+  metrics:
+    - total_return
+    - annualized_return
+    - volatility
+    - sharpe
+    - max_drawdown
+    - win_rate
+    - turnover
+    - transaction_cost
+  
+  # Risk management
+  risk_management:
+    max_position_size: 0.25  # Max 25% in single position
+    max_sector_exposure: 0.50  # Max 50% in single sector
+    stop_loss: 0.10  # 10% stop loss
+    
+  # Execution rules
+  execution:
+    # Use shifted weights to avoid same-day execution bias
+    use_shifted_weights: true
+    shift_days: 1
+    
+    # Slippage
+    slippage: 0.0005  # 0.05% slippage
+    
+    # Price type
+    price_type: close  # Use close price for execution
+
+# Performance evaluation
+evaluation:
+  # Minimum Sharpe ratio threshold
+  min_sharpe: 0.5
+  
+  # Maximum acceptable drawdown
+  max_drawdown_threshold: 0.30  # 30%
+  
+  # Minimum win rate
+  min_win_rate: 0.45
+  
+  # Maximum turnover
+  max_turnover: 2.0  # 200% annual turnover
+
+# Paper trading (future)
+paper_trading:
+  enabled: false
+  
+  # Paper trading parameters
+  virtual_capital: 100000000
+  execution_delay: 1  # 1 day delay
+  slippage: 0.0005
+
+# Live trading (future - not for MVP)
+live_trading:
+  enabled: false
+  disclaimer: "Live trading is not implemented in MVP. This system is for research and decision support only."

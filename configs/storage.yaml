@@ -1,0 +1,119 @@
+# Storage Configuration for BQuant
+
+# DuckDB database configuration
+duckdb:
+  path: warehouse/bquant.duckdb
+  read_only: false
+  memory_limit: 4GB
+  threads: 4
+
+# Parquet storage configuration
+parquet:
+  compression: snappy
+  row_group_size: 100000
+  data_page_size: 1024
+
+# Data lake paths
+paths:
+  base: data
+  raw: data/raw
+  curated_base: data/base
+  silver: data/silver
+  gold: data/gold
+  marts: data/marts
+  metadata: data/metadata
+  warehouse: warehouse
+
+# Dataset specific paths
+datasets:
+  daily_ohlcv_10y:
+    path: data/base/daily_10y
+    format: parquet
+    layout: one_file_per_symbol
+    file_pattern: "{symbol}_{coverage_start}_curr.parquet"
+
+  intraday_ohlcv_15m_60d:
+    path: data/base/intraday_15m_60d
+    format: parquet
+    layout: one_file_per_symbol
+    file_pattern: "{symbol}_intra60_{snapshot_date}.parquet"
+
+  intraday_ohlcv_15m_delta:
+    path: data/base/intraday_15m_delta
+    format: parquet
+    layout: one_file_per_symbol
+    file_pattern: "{symbol}_intra_delta_{snapshot_date}.parquet"
+
+  data_file_manifest:
+    path: data/metadata/data_file_manifest.parquet
+    format: parquet
+
+  raw_ohlcv:
+    path: data/raw/ohlcv/source=vnquant
+    format: parquet
+    partition_by: [symbol]
+
+  raw_ohlcv_hourly:
+    path: data/raw/ohlcv_1h/source=vnstock_vci
+    format: parquet
+    partition_by: [symbol]
+  
+  clean_ohlcv_daily:
+    path: data/silver/clean_ohlcv_daily
+    format: parquet
+
+  clean_ohlcv_hourly:
+    path: data/silver/clean_ohlcv_hourly
+    format: parquet
+  
+  universe_members:
+    path: data/silver/universe_members
+    format: parquet
+  
+  technical_features_daily:
+    path: data/gold/technical_features_daily
+    format: parquet
+  
+  combined_features_daily:
+    path: data/gold/combined_features_daily
+    format: parquet
+  
+  trading_signals:
+    path: data/marts/trading_signals
+    format: parquet
+  
+  backtest_results:
+    path: data/marts/backtest_results
+    format: parquet
+
+# Storage policies
+policies:
+  raw:
+    mode: append
+    overwrite: false
+    versioning: false
+
+  base:
+    mode: replace_per_symbol
+    overwrite: true
+    versioning: false
+
+  metadata:
+    mode: replace
+    overwrite: true
+    versioning: false
+  
+  silver:
+    mode: replace
+    overwrite: true
+    versioning: false
+  
+  gold:
+    mode: replace
+    overwrite: true
+    versioning: false
+  
+  marts:
+    mode: replace
+    overwrite: true
+    versioning: false

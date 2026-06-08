@@ -1,0 +1,54 @@
+# VN30 Universe Configuration
+
+universe:
+  name: VN30
+  description: Vietnam 30 Index - Top 30 largest market cap stocks
+  effective_date: "2026-01-01"
+  source: manual_config
+
+# Test universe for initial development
+test_symbols:
+  - FPT
+  - HPG
+  - VCB
+
+# Full VN30 universe (for production)
+symbols:
+  - ACB
+  - BCM
+  - BID
+  - BVH
+  - CTG
+  - FPT
+  - GAS
+  - GVR
+  - HDB
+  - HPG
+  - MBB
+  - MSN
+  - MWG
+  - PLX
+  - POW
+  - SAB
+  - SHB
+  - SSB
+  - SSI
+  - STB
+  - TCB
+  - TPB
+  - VCB
+  - VHM
+  - VIB
+  - VIC
+  - VJC
+  - VNM
+  - VPB
+  - VRE
+
+# Universe metadata
+metadata:
+  index_name: VN30
+  index_ticker: VN30
+  market: HOSE
+  currency: VND
+  rebalance_frequency: quarterly

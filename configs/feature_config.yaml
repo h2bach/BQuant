@@ -1,0 +1,172 @@
+# Feature Engineering Configuration
+
+# Technical features
+technical_features:
+  enabled: true
+  
+  # Return features
+  return_features:
+    - name: return_1d
+      description: 1-day return
+      formula: close / lag(close, 1) - 1
+      window: 1
+    
+    - name: return_5d
+      description: 5-day return
+      formula: close / lag(close, 5) - 1
+      window: 5
+    
+    - name: return_20d
+      description: 20-day return
+      formula: close / lag(close, 20) - 1
+      window: 20
+    
+    - name: log_return_1d
+      description: 1-day log return
+      formula: log(close / lag(close, 1))
+      window: 1
+  
+  # Volatility features
+  volatility_features:
+    - name: volatility_20d
+      description: 20-day volatility
+      formula: stddev(return_1d, 20)
+      window: 20
+  
+  # Moving average features
+  ma_features:
+    - name: ma_20
+      description: 20-day moving average
+      formula: avg(close, 20)
+      window: 20
+    
+    - name: ma_50
+      description: 50-day moving average
+      formula: avg(close, 50)
+      window: 50
+    
+    - name: price_to_ma20
+      description: Price relative to 20-day MA
+      formula: close / ma_20
+      window: 20
+  
+  # Momentum indicators
+  momentum_indicators:
+    - name: rsi_14
+      description: 14-day Relative Strength Index
+      window: 14
+    
+    - name: macd
+      description: MACD line
+      fast_period: 12
+      slow_period: 26
+      signal_period: 9
+    
+    - name: macd_signal
+      description: MACD signal line
+      fast_period: 12
+      slow_period: 26
+      signal_period: 9
+    
+    - name: atr_14
+      description: 14-day Average True Range
+      window: 14
+  
+  # Volume features
+  volume_features:
+    - name: volume_zscore_20
+      description: 20-day volume z-score
+      formula: (volume - avg(volume, 20)) / stddev(volume, 20)
+      window: 20
+  
+  # Composite scores
+  composite_features:
+    - name: trend_score
+      description: Trend strength score (0-1)
+      components:
+        - price_to_ma20
+        - return_20d
+        - rsi_14
+    
+    - name: momentum_score
+      description: Momentum score (0-1)
+      components:
+        - return_5d
+        - return_20d
+        - macd
+
+# Combined features
+combined_features:
+  enabled: true
+  
+  # Score components
+  scores:
+    - name: technical_score
+      description: Composite technical score (0-1)
+      weight: 1.0
+      components:
+        - trend_score
+        - momentum_score
+        - rsi_14
+    
+    - name: nlp_score
+      description: NLP sentiment score (0-1)
+      weight: 0.0
+      placeholder: true  # MVP placeholder
+    
+    - name: market_regime_score
+      description: Market regime score (0-1)
+      weight: 0.5
+      placeholder: true  # MVP placeholder
+    
+    - name: risk_score
+      description: Risk score (0-1)
+      weight: 1.0
+      formula: volatility_20d rank
+  
+  # Target labels (for training only)
+  targets:
+    - name: target_return_5d
+      description: 5-day forward return
+      formula: lag(close, -5) / close - 1
+      shift: -5
+      training_only: true
+    
+    - name: target_up_5d
+      description: Binary target: 1 if 5-day return > 0
+      formula: case when target_return_5d > 0 then 1 else 0 end
+      shift: -5
+      training_only: true
+
+# Feature computation rules
+computation_rules:
+  # Rolling windows must be computed per symbol
+  per_symbol_rolling: true
+  
+  # Do not compute rolling statistics across symbols
+  cross_symbol_rolling: false
+  
+  # Drop early rows with insufficient history in derived tables
+  drop_insufficient_history: true
+  
+  # Minimum history required for features
+  min_history_days: 50
+  
+  # Sort order
+  sort_by:
+    - symbol
+    - trading_date
+
+# Feature validation
+validation:
+  # Check for missing values
+  check_missing: true
+  
+  # Check for infinite values
+  check_infinite: true
+  
+  # Check for outliers (z-score > 5)
+  check_outliers: true
+  
+  # Ensure no target leakage in signal columns
+  check_target_leakage: true

@@ -1,0 +1,368 @@
+# Validation Rules for BQuant
+# Define data quality checks for each dataset
+
+# OHLCV validation rules
+ohlcv_validation:
+  # Required columns
+  required_columns:
+    - symbol
+    - trading_date
+    - open
+    - high
+    - low
+    - close
+    - volume
+    - source
+  
+  # Column data types
+  column_types:
+    symbol: string
+    trading_date: date
+    open: float
+    high: float
+    low: float
+    close: float
+    adjusted_close: float
+    volume: float
+    source: string
+  
+  # Value constraints
+  constraints:
+    - rule: symbol_not_null
+      description: Symbol cannot be null or empty
+      check: symbol IS NOT NULL AND symbol != ''
+      severity: error
+    
+    - rule: trading_date_not_null
+      description: Trading date cannot be null
+      check: trading_date IS NOT NULL
+      severity: error
+    
+    - rule: trading_date_valid
+      description: Trading date must be a valid date
+      check: trading_date >= '2000-01-01' AND trading_date <= CURRENT_DATE
+      severity: error
+    
+    - rule: ohlc_positive
+      description: OHLC must be positive
+      check: open > 0 AND high > 0 AND low > 0 AND close > 0
+      severity: error
+    
+    - rule: high_ge_low
+      description: High must be greater than or equal to low
+      check: high >= low
+      severity: error
+    
+    - rule: volume_non_negative
+      description: Volume must be non-negative
+      check: volume >= 0
+      severity: error
+    
+    - rule: source_not_null
+      description: Source cannot be null or empty
+      check: source IS NOT NULL AND source != ''
+      severity: error
+  
+  # Uniqueness constraints
+  uniqueness:
+    - columns: [symbol, trading_date]
+      description: No duplicate symbol + trading_date combinations
+      severity: error
+  
+  # Sorting requirements
+  sort_order:
+    - symbol
+    - trading_date
+
+# Hourly OHLCV validation rules
+ohlcv_hourly_validation:
+  required_columns:
+    - symbol
+    - bar_time
+    - open
+    - high
+    - low
+    - close
+    - volume
+    - interval
+    - source
+
+  column_types:
+    symbol: string
+    bar_time: timestamp
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    interval: string
+    source: string
+
+  constraints:
+    - rule: symbol_not_null
+      description: Symbol cannot be null or empty
+      check: symbol IS NOT NULL AND symbol != ''
+      severity: error
+
+    - rule: bar_time_not_null
+      description: Bar timestamp cannot be null
+      check: bar_time IS NOT NULL
+      severity: error
+
+    - rule: bar_time_valid
+      description: Bar timestamp must be within a valid range
+      check: bar_time >= '2000-01-01' AND bar_time <= CURRENT_TIMESTAMP
+      severity: error
+
+    - rule: ohlc_positive
+      description: OHLC must be positive
+      check: open > 0 AND high > 0 AND low > 0 AND close > 0
+      severity: error
+
+    - rule: high_ge_low
+      description: High must be greater than or equal to low
+      check: high >= low
+      severity: error
+
+    - rule: volume_non_negative
+      description: Volume must be non-negative
+      check: volume >= 0
+      severity: error
+
+    - rule: interval_not_null
+      description: Interval cannot be null or empty
+      check: interval IS NOT NULL AND interval != ''
+      severity: error
+
+    - rule: source_not_null
+      description: Source cannot be null or empty
+      check: source IS NOT NULL AND source != ''
+      severity: error
+
+  uniqueness:
+    - columns: [symbol, bar_time, source]
+      description: No duplicate symbol + bar_time + source combinations
+      severity: error
+
+  sort_order:
+    - symbol
+    - bar_time
+
+# Feature validation rules
+feature_validation:
+  # Technical features
+  technical_features:
+    required_columns:
+      - symbol
+      - trading_date
+    
+    constraints:
+      - rule: symbol_not_null
+        description: Symbol cannot be null
+        check: symbol IS NOT NULL
+        severity: error
+      
+      - rule: trading_date_not_null
+        description: Trading date cannot be null
+        check: trading_date IS NOT NULL
+        severity: error
+      
+      - rule: per_symbol_rolling
+        description: Rolling features must be computed per symbol only
+        check: true  # Enforced in computation logic
+        severity: error
+      
+      - rule: no_cross_symbol_rolling
+        description: Rolling windows must not cross symbols
+        check: true  # Enforced in computation logic
+        severity: error
+      
+      - rule: no_future_data
+        description: Features must not use future data
+        check: true  # Enforced in computation logic
+        severity: error
+    
+    uniqueness:
+      - columns: [symbol, trading_date]
+        description: No duplicate symbol + trading_date combinations
+        severity: error
+    
+    sort_order:
+      - symbol
+      - trading_date
+  
+  # Combined features
+  combined_features:
+    required_columns:
+      - symbol
+      - trading_date
+    
+    constraints:
+      - rule: no_target_leakage_in_signals
+        description: Target columns must not be used in signal generation
+        check: true  # Enforced in signal generation logic
+        severity: error
+      
+      - rule: training_only_targets
+        description: Target columns are for training only
+        check: true  # Enforced in pipeline logic
+        severity: warning
+    
+    uniqueness:
+      - columns: [symbol, trading_date]
+        description: No duplicate symbol + trading_date combinations
+        severity: error
+    
+    sort_order:
+      - symbol
+      - trading_date
+
+# Signal validation rules
+signal_validation:
+  required_columns:
+    - symbol
+    - signal_date
+    - signal
+    - final_score
+  
+  constraints:
+    - rule: symbol_not_null
+      description: Symbol cannot be null
+      check: symbol IS NOT NULL
+      severity: error
+    
+    - rule: signal_date_not_null
+      description: Signal date cannot be null
+      check: signal_date IS NOT NULL
+      severity: error
+    
+    - rule: signal_valid
+      description: Signal must be one of BUY, HOLD, AVOID
+      check: signal IN ('BUY', 'HOLD', 'AVOID')
+      severity: error
+    
+    - rule: final_score_range
+      description: Final score should be between 0 and 1
+      check: final_score >= 0 AND final_score <= 1
+      severity: warning
+    
+    - rule: no_target_in_signals
+      description: Target columns must not appear in signals
+      check: true  # Enforced in signal generation logic
+      severity: error
+
+# Backtest validation rules
+backtest_validation:
+  required_columns:
+    - strategy_name
+    - universe
+    - start_date
+    - end_date
+    - total_return
+    - sharpe
+    - max_drawdown
+  
+  constraints:
+    - rule: strategy_name_not_null
+      description: Strategy name cannot be null
+      check: strategy_name IS NOT NULL
+      severity: error
+    
+    - rule: date_range_valid
+      description: End date must be after start date
+      check: end_date > start_date
+      severity: error
+    
+    - rule: transaction_cost_applied
+      description: Transaction cost must be applied
+      check: transaction_cost IS NOT NULL AND transaction_cost >= 0
+      severity: error
+    
+    - rule: shifted_weights_used
+      description: Weights must be shifted to avoid same-day execution bias
+      check: true  # Enforced in backtest logic
+      severity: error
+    
+    - rule: no_target_in_strategy
+      description: Target columns must not be used in strategy decisions
+      check: true  # Enforced in backtest logic
+      severity: error
+
+# Universe validation rules
+universe_validation:
+  required_columns:
+    - universe_name
+    - symbol
+    - effective_date
+  
+  constraints:
+    - rule: universe_name_not_null
+      description: Universe name cannot be null
+      check: universe_name IS NOT NULL
+      severity: error
+    
+    - rule: symbol_not_null
+      description: Symbol cannot be null
+      check: symbol IS NOT NULL
+      severity: error
+    
+    - rule: effective_date_not_null
+      description: Effective date cannot be null
+      check: effective_date IS NOT NULL
+      severity: error
+    
+    - rule: date_range_valid
+      description: End date must be after effective date if specified
+      check: end_date IS NULL OR end_date >= effective_date
+      severity: error
+
+# Pipeline validation rules
+pipeline_validation:
+  constraints:
+    - rule: logging_enabled
+      description: All pipeline operations must be logged
+      check: true  # Enforced in pipeline logic
+      severity: error
+    
+    - rule: config_driven_paths
+      description: All paths must come from config, not hard-coded
+      check: true  # Enforced in code review
+      severity: error
+    
+    - rule: raw_data_not_overwritten
+      description: Raw data should not be overwritten without clear intent
+      check: true  # Enforced in storage policies
+      severity: warning
+
+# Data quality thresholds
+quality_thresholds:
+  # Missing value thresholds
+  max_missing_ratio:
+    raw: 0.05  # 5% max missing in raw data
+    silver: 0.0  # 0% missing in silver data
+    gold: 0.0  # 0% missing in gold data
+    marts: 0.0  # 0% missing in marts data
+  
+  # Outlier thresholds (z-score)
+  outlier_zscore_threshold: 5.0
+  
+  # Duplicate thresholds
+  max_duplicate_ratio: 0.0  # 0% duplicates allowed
+
+# Validation execution
+execution:
+  # When to run validation
+  run_on:
+    - data_ingestion
+    - feature_computation
+    - signal_generation
+    - backtest_run
+  
+  # Action on validation failure
+  on_failure:
+    error: stop  # Stop pipeline on error
+    warning: log  # Log warning and continue
+  
+  # Logging
+  log_validation_results: true
+  save_validation_report: true
