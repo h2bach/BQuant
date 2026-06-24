@@ -1,0 +1,49 @@
+timezone: Asia/Ho_Chi_Minh
+
+market:
+  name: HOSE
+  intraday_interval_minutes: 15
+  intraday_slots:
+    - "09:15"
+    - "09:30"
+    - "09:45"
+    - "10:00"
+    - "10:15"
+    - "10:30"
+    - "10:45"
+    - "11:00"
+    - "11:15"
+    - "11:30"
+    - "13:00"
+    - "13:15"
+    - "13:30"
+    - "13:45"
+    - "14:00"
+    - "14:15"
+    - "14:30"
+    - "14:45"
+  eod_reconcile_time: "15:10"
+  weekend_days:
+    - 5
+    - 6
+
+worker:
+  name: bquant_live_worker
+  poll_interval_seconds: 60
+  catch_up_slots: 2
+  heartbeat_grace_seconds: 120
+  ingest_logs_every_seconds: 60
+  evaluate_alerts_every_seconds: 60
+  consecutive_failure_escalation: 2
+
+jobs:
+  intraday_delta:
+    dataset_name: intraday_ohlcv_15m_delta
+    overlap_bars: 1
+    max_parallel_symbols: 2
+    source_empty_alert_threshold: 2
+  eod_reconcile:
+    daily_dataset_name: daily_ohlcv_10y
+    intraday_base_dataset_name: intraday_ohlcv_15m_60d
+    intraday_delta_dataset_name: intraday_ohlcv_15m_delta
+    refresh_latest_day_only: true

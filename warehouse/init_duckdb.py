@@ -10,6 +10,8 @@ from pathlib import Path
 from utils.logger import BQuantLogger
 from warehouse.data_manifest import initialize_manifest_file
 from warehouse.duckdb_connection import execute_sql_file, get_connection, get_duckdb_path
+from warehouse.init_observability import initialize_observability
+from warehouse.refresh_state import ensure_refresh_state_table
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -23,6 +25,13 @@ def ensure_required_directories() -> None:
         "logs/pipeline",
         "logs/errors",
         "logs/data",
+        "logs/observability/jsonl/scheduler",
+        "logs/observability/jsonl/pipeline",
+        "logs/observability/jsonl/ingestion",
+        "logs/observability/jsonl/web",
+        "logs/observability/jsonl/alerts",
+        "logs/observability/dead_letter",
+        "logs/observability/parquet",
         "data/base/daily_10y",
         "data/base/intraday_15m_60d",
         "data/base/intraday_15m_delta",
@@ -56,6 +65,7 @@ def verify_database_state() -> dict[str, object]:
         "trading_signals",
         "backtest_runs",
         "pipeline_runs",
+        "dataset_refresh_state",
         "metadata",
     ]
     expected_views = [
@@ -164,6 +174,12 @@ def main() -> None:
 
         initialize_manifest_file()
         steps_completed.append("initialize_manifest_file")
+
+        ensure_refresh_state_table()
+        steps_completed.append("ensure_refresh_state")
+
+        initialize_observability()
+        steps_completed.append("initialize_observability")
 
         verification = verify_database_state()
         if verification["missing_tables"] or verification["missing_views"]:

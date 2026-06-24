@@ -1,0 +1,33 @@
+database:
+  path: warehouse/bquant_observability.duckdb
+  read_only: false
+  memory_limit: 2GB
+  threads: 2
+
+logs:
+  base_dir: logs/observability
+  jsonl_dir: logs/observability/jsonl
+  parquet_dir: logs/observability/parquet
+  dead_letter_dir: logs/observability/dead_letter
+  channels:
+    scheduler: logs/observability/jsonl/scheduler
+    pipeline: logs/observability/jsonl/pipeline
+    ingestion: logs/observability/jsonl/ingestion
+    web: logs/observability/jsonl/web
+    alerts: logs/observability/jsonl/alerts
+
+retention:
+  jsonl_hot_days: 30
+  observability_db_days: 180
+
+alerts:
+  heartbeat_lag_seconds: 120
+  intraday_lag_minutes: 30
+  empty_payload_consecutive_slots: 2
+  consecutive_job_failures: 2
+  pending_merge_max_sessions: 1
+
+ui:
+  recent_job_limit: 20
+  recent_error_limit: 20
+  alert_limit: 100

@@ -184,6 +184,17 @@ def _cleanup_existing_files(directory: Path, symbol: str, spec: DatasetFileSpec,
             candidate.unlink(missing_ok=True)
 
 
+def _delete_symbol_files(directory: Path, symbol: str, spec: DatasetFileSpec) -> None:
+    if spec.dataset_name == "daily_ohlcv_10y":
+        pattern = f"{symbol}_*.parquet"
+    elif spec.dataset_name == "intraday_ohlcv_15m_60d":
+        pattern = f"{symbol}_intra60_*.parquet"
+    else:
+        pattern = f"{symbol}_intra_delta_*.parquet"
+    for candidate in directory.glob(pattern):
+        candidate.unlink(missing_ok=True)
+
+
 def _latest_expected_ts(spec: DatasetFileSpec, snapshot_date: date | None) -> datetime | None:
     managed_cfg = _load_management_config(spec.dataset_name)
     refresh_time = managed_cfg.get("refresh_time")
@@ -277,6 +288,34 @@ def _upsert_manifest_row(record: dict[str, Any]) -> None:
         )
 
 
+def _record_empty_manifest_row(spec: DatasetFileSpec, symbol: str, snapshot_date: date | None) -> dict[str, Any]:
+    output_dir = _resolve_dataset_path(spec.dataset_name)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _delete_symbol_files(output_dir, symbol, spec)
+    record = {
+        "dataset_name": spec.dataset_name,
+        "symbol": symbol,
+        "file_role": spec.file_role,
+        "granularity": spec.granularity,
+        "interval": spec.interval,
+        "file_name": "",
+        "file_path": "",
+        "coverage_start": None,
+        "coverage_end": None,
+        "row_count": 0,
+        "file_size_bytes": 0,
+        "snapshot_date": snapshot_date,
+        "source": spec.source,
+        "latest_expected_ts": _latest_expected_ts(spec, snapshot_date),
+        "update_status": "empty",
+        "needs_merge": False,
+        "notes": "No rows materialized for symbol",
+        "last_refresh_at": datetime.now(),
+    }
+    _upsert_manifest_row(record)
+    return record
+
+
 def export_manifest_file() -> str:
     output_path = _manifest_path()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -295,7 +334,7 @@ def export_manifest_file() -> str:
 def _materialize_symbol(spec: DatasetFileSpec, symbol: str, snapshot_date: date | None) -> dict[str, Any] | None:
     df = _read_table_slice(spec, symbol)
     if df.empty:
-        return None
+        return _record_empty_manifest_row(spec, symbol, snapshot_date)
 
     output_dir = _resolve_dataset_path(spec.dataset_name)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -357,11 +396,36 @@ def materialize_dataset_from_table(
     # so keep this phase serialized while fetch/upsert remains parallel upstream.
     for symbol in symbols:
         result = _materialize_symbol(spec, symbol, snapshot_date)
-        if result:
+        if result is not None:
             records.append(result)
 
     export_manifest_file()
     return sorted(records, key=lambda item: (item["dataset_name"], item["symbol"]))
+
+
+def clear_dataset_materialization(
+    dataset_name: str,
+    *,
+    symbols: list[str] | None = None,
+    snapshot_date: date | None = None,
+) -> list[dict[str, Any]]:
+    if dataset_name not in DATASET_FILE_SPECS:
+        raise KeyError(f"Dataset {dataset_name} is not materializable")
+    spec = DATASET_FILE_SPECS[dataset_name]
+    if symbols is None:
+        with get_connection(read_only=True) as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT symbol
+                FROM universe_members
+                ORDER BY symbol
+                """
+            ).fetchall()
+        symbols = [str(row[0]) for row in rows]
+
+    records = [_record_empty_manifest_row(spec, symbol, snapshot_date) for symbol in symbols]
+    export_manifest_file()
+    return records
 
 
 def initialize_manifest_file() -> str:

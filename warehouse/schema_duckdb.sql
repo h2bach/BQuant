@@ -330,6 +330,20 @@ CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status ON pipeline_runs(status);
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_created ON pipeline_runs(created_at);
 
 -- ============================================
+-- Dataset Refresh State Table
+-- ============================================
+CREATE TABLE IF NOT EXISTS dataset_refresh_state (
+    dataset_name VARCHAR PRIMARY KEY,
+    refresh_version BIGINT NOT NULL DEFAULT 0,
+    last_success_at TIMESTAMP,
+    latest_data_ts TIMESTAMP,
+    last_run_id VARCHAR,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_dataset_refresh_state_updated ON dataset_refresh_state(updated_at);
+
+-- ============================================
 -- Views for Common Queries
 -- ============================================
 

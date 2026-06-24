@@ -44,7 +44,7 @@ warehouse/*.duckdb
 warehouse/*.duckdb.*
 
 # Generated reports
-agent_build_reports/
+# agent_build_reports/
 
 # Temporary or local scratch files
 tmp/
