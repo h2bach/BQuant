@@ -41,6 +41,7 @@ PIPELINE_NAME = "run_eod_reconcile"
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the end-of-day reconcile job."""
     parser = argparse.ArgumentParser(description="Run end-of-day reconcile for live update datasets.")
     parser.add_argument("--trade-date", help="Trade date in YYYY-MM-DD format.")
     parser.add_argument("--symbols", nargs="*", help="Optional symbol subset.")
@@ -52,6 +53,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _trade_date(args_trade_date: str | None) -> datetime.date:
+    """Resolve the target trade date from CLI input or the current local date."""
     if args_trade_date:
         return datetime.fromisoformat(args_trade_date).date()
     return now_local().date()
@@ -63,6 +65,7 @@ def _fetch_symbol_daily_latest(
     limiter: SlidingWindowRateLimiter,
     logger: BQuantLogger,
 ) -> pd.DataFrame:
+    """Fetch the latest daily bar for one symbol as part of EOD reconciliation."""
     request_id = create_run_id()
     request_start = datetime.now()
     waited = limiter.acquire()
@@ -129,6 +132,7 @@ def _fetch_symbol_daily_latest(
 
 
 def _load_delta_rows(trade_date: datetime.date) -> pd.DataFrame:
+    """Load delta intraday rows that should be merged into the intraday base dataset."""
     with get_connection(read_only=True) as conn:
         frame = conn.execute(
             """
@@ -146,6 +150,7 @@ def _load_delta_rows(trade_date: datetime.date) -> pd.DataFrame:
 
 
 def _clear_delta_rows(trade_date: datetime.date) -> int:
+    """Delete reconciled delta rows up to the supplied trade date."""
     with get_connection(read_only=False) as conn:
         count = conn.execute(
             "SELECT count(*) FROM intraday_ohlcv_15m_delta WHERE session_date <= ?",
@@ -156,6 +161,7 @@ def _clear_delta_rows(trade_date: datetime.date) -> int:
 
 
 def _trim_intraday_base_window(trade_date: datetime.date) -> int:
+    """Trim intraday base rows older than the configured rolling lookback window."""
     cutoff = trade_date - timedelta(days=base_intraday_lookback_days())
     with get_connection(read_only=False) as conn:
         count = conn.execute(
@@ -175,6 +181,7 @@ def run_eod_reconcile(
     run_post_hooks: bool = True,
     dry_run: bool = False,
 ) -> dict[str, Any]:
+    """Run the EOD daily refresh plus intraday base merge and delta cleanup."""
     initialize_observability()
     ensure_refresh_state_table()
 
@@ -340,6 +347,8 @@ def run_eod_reconcile(
         daily_materialized = materialize_dataset_from_table("daily_ohlcv_10y", symbols=target_symbols)
         steps_completed.append("materialize_daily")
 
+        # The daily refresh and delta merge are kept as separate steps so failures
+        # remain diagnosable and reruns stay idempotent at the table-slice level.
         merged_intraday_rows = 0
         if not delta_df.empty:
             merged_intraday_rows = upsert_intraday_rows("intraday_ohlcv_15m_base", delta_df)
@@ -384,6 +393,8 @@ def run_eod_reconcile(
         )
         steps_completed.append("refresh_versions")
 
+        # Emit checkpoint events for both the refreshed base and the cleared delta
+        # so the observability projection can show reconciliation state per symbol.
         for symbol in target_symbols:
             latest_base_ts = get_latest_plot_timestamp(symbol)
             job_logger.emit_event(
@@ -528,6 +539,7 @@ def run_eod_reconcile(
 
 
 def main() -> None:
+    """CLI entrypoint for the end-of-day reconcile job."""
     args = parse_args()
     run_eod_reconcile(
         trade_date=_trade_date(args.trade_date),

@@ -34,11 +34,13 @@ RUNTIME_BACKEND_STATUS = {"vndirect": True, "cafef": True}
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
+    """Load a YAML file into a dictionary."""
     with path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
 
 
 def _resolve_repo_path(path_str: str) -> Path:
+    """Resolve an absolute path or a repo-relative config path."""
     path = Path(path_str)
     if path.is_absolute():
         return path
@@ -46,11 +48,13 @@ def _resolve_repo_path(path_str: str) -> Path:
 
 
 def _load_source_config() -> dict[str, Any]:
+    """Return the configured vnquant-compatible source settings."""
     config = _load_yaml(DATA_SOURCES_CONFIG_PATH)
     return config.get("vnquant", {})
 
 
 def _load_dataset_config(dataset_name: str) -> dict[str, Any]:
+    """Load one dataset definition from the dataset registry."""
     registry = _load_yaml(DATASET_REGISTRY_PATH)
     datasets = registry.get("datasets", {})
     if dataset_name not in datasets:
@@ -59,14 +63,17 @@ def _load_dataset_config(dataset_name: str) -> dict[str, Any]:
 
 
 def _today_str() -> str:
+    """Return today's date in ISO format."""
     return date.today().isoformat()
 
 
 def _default_start_date() -> str:
+    """Return the first day of the current year as the default backfill start."""
     return date(date.today().year, 1, 1).isoformat()
 
 
 def _safe_import_vnquant() -> tuple[bool, str | None]:
+    """Probe whether the optional `vnquant` package is importable in this environment."""
     try:
         import vnquant  # noqa: F401
 
@@ -76,6 +83,7 @@ def _safe_import_vnquant() -> tuple[bool, str | None]:
 
 
 def _parse_number(value: Any) -> float:
+    """Parse a backend numeric field into a float with empty values mapped to zero."""
     if value is None or (isinstance(value, float) and math.isnan(value)):
         return 0.0
     if isinstance(value, (int, float)):
@@ -87,6 +95,7 @@ def _parse_number(value: Any) -> float:
 
 
 def _parse_change_str(value: Any) -> tuple[float | None, float | None]:
+    """Parse a textual change string into absolute and percentage change values."""
     if value is None:
         return None, None
     match = CHANGE_PATTERN.search(str(value).replace(",", "."))
@@ -96,6 +105,7 @@ def _parse_change_str(value: Any) -> tuple[float | None, float | None]:
 
 
 def get_vn30_symbols(use_test_symbols: bool = False) -> list[str]:
+    """Load VN30 or test symbols from the universe config."""
     payload = _load_yaml(UNIVERSE_CONFIG_PATH)
     key = "test_symbols" if use_test_symbols else "symbols"
     symbols = payload.get(key, [])
@@ -105,6 +115,7 @@ def get_vn30_symbols(use_test_symbols: bool = False) -> list[str]:
 
 
 def _fetch_vndirect(symbol: str, start_date: str, end_date: str, timeout_seconds: int) -> pd.DataFrame:
+    """Fetch raw daily OHLCV rows from the VNDIRECT endpoint."""
     query = f"code:{symbol}~date:gte:{start_date}~date:lte:{end_date}"
     params = {
         "sort": "date",
@@ -120,6 +131,7 @@ def _fetch_vndirect(symbol: str, start_date: str, end_date: str, timeout_seconds
 
 
 def _fetch_cafef(symbol: str, start_date: str, end_date: str, timeout_seconds: int) -> pd.DataFrame:
+    """Fetch raw daily OHLCV rows from the CAFEF endpoint."""
     params = {
         "Symbol": symbol,
         "StartDate": start_date,
@@ -264,6 +276,7 @@ def standardize_ohlcv(df: pd.DataFrame, symbol: str, source: str = "vnquant", ba
 
 
 def _get_existing_keys(symbols: list[str], start_date: str, end_date: str) -> set[tuple[str, date, str]]:
+    """Load existing raw daily keys for duplicate suppression."""
     placeholders = ",".join(["?"] * len(symbols))
     sql = f"""
         SELECT symbol, trading_date, source
@@ -278,6 +291,7 @@ def _get_existing_keys(symbols: list[str], start_date: str, end_date: str) -> se
 
 
 def _filter_new_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only raw daily rows that are not already stored in DuckDB."""
     if df.empty:
         return df.copy()
     symbols = sorted(df["symbol"].unique().tolist())
@@ -292,6 +306,7 @@ def _filter_new_rows(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _write_raw_partitioned_parquet(df: pd.DataFrame) -> list[str]:
+    """Write raw daily rows into symbol-partitioned Parquet files."""
     dataset_cfg = _load_dataset_config("raw_ohlcv")
     base_dir = _resolve_repo_path(dataset_cfg["parquet_path"])
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -337,6 +352,7 @@ def record_pipeline_run(
     output_rows: int,
     error_message: str | None = None,
 ) -> None:
+    """Persist one pipeline-run summary row into the shared pipeline registry."""
     with get_connection(read_only=False) as conn:
         conn.execute(
             """
@@ -366,6 +382,7 @@ def record_pipeline_run(
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for vnquant-compatible raw daily ingestion."""
     parser = argparse.ArgumentParser(description="Fetch OHLCV data using vnquant-compatible sources.")
     parser.add_argument("--symbols", nargs="*", help="Explicit symbols to fetch. Overrides universe config.")
     parser.add_argument("--test", action="store_true", help="Use test symbols from universe config.")
@@ -375,12 +392,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def _resolve_symbols(args: argparse.Namespace) -> list[str]:
+    """Resolve explicit or universe-config symbols for the current run."""
     if args.symbols:
         return [str(symbol).upper() for symbol in args.symbols]
     return get_vn30_symbols(use_test_symbols=args.test)
 
 
 def main() -> None:
+    """Fetch, standardize, deduplicate, and persist raw daily OHLCV rows."""
     args = parse_args()
     logger = BQuantLogger(PIPELINE_NAME)
     start_time = datetime.now()
@@ -412,6 +431,8 @@ def main() -> None:
                 import_error=import_error,
             )
 
+        # Source fallback happens inside `fetch_ohlcv_vnquant`, but each symbol still
+        # flows through the same raw-standardize-save lifecycle for consistent lineage.
         for symbol in symbols:
             raw_df, backend = fetch_ohlcv_vnquant(symbol, args.start_date, args.end_date, logger=logger)
             total_fetched_rows += len(raw_df)

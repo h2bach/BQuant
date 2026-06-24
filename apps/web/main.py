@@ -11,6 +11,7 @@ from nicegui import app, ui
 from nicegui.client import Client
 
 from warehouse.init_observability import initialize_observability
+from warehouse.observability_connection import get_observability_db_path
 from warehouse.refresh_state import ensure_refresh_state_table
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -94,7 +95,8 @@ def alerts(client: Client):
 
 def main():
     """Run the NiceGUI application."""
-    initialize_observability()
+    if not Path(get_observability_db_path()).exists():
+        initialize_observability()
     ensure_refresh_state_table()
     ui.run(
         title="BQuant Platform",

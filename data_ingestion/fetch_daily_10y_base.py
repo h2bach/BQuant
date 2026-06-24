@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 import yaml
 
-from data_ingestion.fetch_vn30_universe import DEFAULT_CONFIG_PATH, _load_yaml
+from data_ingestion.fetch_vn30_universe import DEFAULT_CONFIG_PATH
 from data_ingestion.yfinance_adapter import fetch_daily_history, source_config
 from utils.logger import BQuantLogger
 from utils.rate_limit import SlidingWindowRateLimiter
@@ -28,29 +28,35 @@ PIPELINE_NAME = "fetch_daily_10y_base"
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
+    """Load a YAML file into a dictionary."""
     with path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
 
 
 def _source_config() -> dict[str, Any]:
+    """Return the yfinance source configuration for daily ingestion."""
     return source_config()
 
 
 def _management_config() -> dict[str, Any]:
+    """Return dataset-management settings for the 10-year daily base dataset."""
     return _load_yaml(DATA_MANAGEMENT_PATH).get("datasets", {}).get("daily_ohlcv_10y", {})
 
 
 def _default_start_date() -> str:
+    """Resolve the default trailing start date from the configured lookback years."""
     lookback_years = int(_source_config().get("parameters", {}).get("lookback_years", 10))
     start = date.today() - timedelta(days=lookback_years * 365 + 3)
     return start.isoformat()
 
 
 def _default_end_date() -> str:
+    """Return today's date as the default inclusive end date."""
     return date.today().isoformat()
 
 
 def _resolve_symbols(args: argparse.Namespace) -> list[str]:
+    """Resolve explicit or universe-config symbols for the current run."""
     if args.symbols:
         return [str(symbol).upper() for symbol in args.symbols]
     payload = _load_yaml(DEFAULT_CONFIG_PATH)
@@ -62,6 +68,7 @@ def _resolve_symbols(args: argparse.Namespace) -> list[str]:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the daily base ingestion job."""
     parser = argparse.ArgumentParser(description="Fetch the 10-year daily OHLCV base dataset.")
     parser.add_argument("--symbols", nargs="*", help="Explicit symbols to fetch.")
     parser.add_argument("--test", action="store_true", help="Use the test universe.")
@@ -78,6 +85,7 @@ def _fetch_symbol(
     limiter: SlidingWindowRateLimiter,
     logger: BQuantLogger,
 ) -> tuple[str, pd.DataFrame, str]:
+    """Fetch one symbol's daily history with rate limiting and structured logging."""
     try:
         waited = limiter.acquire()
         if waited > 0:
@@ -116,6 +124,7 @@ def _fetch_symbol(
 
 
 def _delete_existing_slice(conn, symbol: str, start_date: Any, end_date: Any) -> None:
+    """Delete the target symbol/date slice before re-inserting refreshed rows."""
     conn.execute(
         """
         DELETE FROM daily_ohlcv_base
@@ -127,11 +136,13 @@ def _delete_existing_slice(conn, symbol: str, start_date: Any, end_date: Any) ->
 
 
 def upsert_daily_rows(df: pd.DataFrame) -> int:
+    """Replace the affected symbol/date slices in `daily_ohlcv_base`."""
     if df.empty:
         return 0
 
     working_df = df.copy()
     with get_connection(read_only=False) as conn:
+        # Slice deletion keeps the job idempotent for reruns and latest-day refreshes.
         for symbol, symbol_df in working_df.groupby("symbol", sort=True):
             start_date = symbol_df["trading_date"].min()
             end_date = symbol_df["trading_date"].max()
@@ -176,6 +187,7 @@ def record_pipeline_run(
     output_rows: int,
     error_message: str | None = None,
 ) -> None:
+    """Persist one pipeline-run summary row into the shared pipeline registry."""
     with get_connection(read_only=False) as conn:
         conn.execute(
             """
@@ -205,11 +217,13 @@ def record_pipeline_run(
 
 
 def main() -> None:
+    """Fetch, upsert, and materialize the canonical daily 10-year base dataset."""
     args = parse_args()
     source_cfg = _source_config()
     mgmt_cfg = _management_config()
     logger = BQuantLogger(PIPELINE_NAME)
 
+    # Latest-day refresh reuses the same path but limits fetch/write scope to one date.
     start_date = args.end_date if args.refresh_latest_day else args.start_date
     end_date = args.end_date
     symbols = _resolve_symbols(args)

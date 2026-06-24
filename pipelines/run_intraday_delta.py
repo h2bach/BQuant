@@ -40,6 +40,7 @@ DATASET_NAME = "intraday_ohlcv_15m_delta"
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the live intraday delta updater."""
     parser = argparse.ArgumentParser(description="Run the live intraday delta updater.")
     parser.add_argument("--slot-time", help="Target slot time in ISO format, e.g. 2026-06-24T10:15:00.")
     parser.add_argument("--symbols", nargs="*", help="Optional symbol subset.")
@@ -51,6 +52,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _slot_datetime(slot_time: str | None) -> datetime | None:
+    """Resolve the target slot datetime from CLI input or the latest eligible slot."""
     if slot_time:
         slot_dt = datetime.fromisoformat(slot_time)
         if slot_dt.tzinfo is None:
@@ -60,6 +62,7 @@ def _slot_datetime(slot_time: str | None) -> datetime | None:
 
 
 def _checkpoint_watermark(symbol: str) -> datetime | None:
+    """Resolve the current symbol watermark from observability or plot data state."""
     initialize_observability()
     with get_observability_connection(read_only=True) as conn:
         value = conn.execute(
@@ -86,9 +89,12 @@ def _fetch_symbol_delta(
     limiter: SlidingWindowRateLimiter,
     logger: BQuantLogger,
 ) -> tuple[str, pd.DataFrame, datetime | None]:
+    """Fetch one symbol's overlapping delta slice for the requested intraday slot."""
     request_id = create_run_id()
     request_start = datetime.now()
     watermark = _checkpoint_watermark(symbol)
+    # Fetch one overlapping bar to avoid dropping the edge of a slot during
+    # retries, restarts, or provider-side late writes.
     overlap = intraday_overlap_delta()
     fetch_start = watermark - overlap if watermark else slot_dt - timedelta(days=2)
     waited = limiter.acquire()
@@ -177,6 +183,7 @@ def run_intraday_delta(
     run_post_hooks: bool = True,
     dry_run: bool = False,
 ) -> dict[str, Any]:
+    """Run the intraday delta fetch, upsert, materialization, and post-hook flow."""
     initialize_observability()
     ensure_refresh_state_table()
 
@@ -360,6 +367,8 @@ def run_intraday_delta(
         )
         steps_completed.append("materialize_delta_files")
 
+        # Checkpoint events let the observability projection reconstruct which
+        # symbol/bar the live worker considers covered after this run.
         for symbol in target_symbols:
             latest_symbol_ts = get_latest_plot_timestamp(symbol)
             job_logger.emit_event(
@@ -499,6 +508,7 @@ def run_intraday_delta(
 
 
 def main() -> None:
+    """CLI entrypoint for the live intraday delta updater."""
     args = parse_args()
     slot_dt = _slot_datetime(args.slot_time)
     run_intraday_delta(

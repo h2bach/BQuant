@@ -31,6 +31,7 @@ PIPELINE_NAME = "live_update_worker"
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI flags for one-shot and dry-run worker execution."""
     parser = argparse.ArgumentParser(description="Run the BQuant live update worker.")
     parser.add_argument("--once", action="store_true", help="Run a single scheduling iteration and exit.")
     parser.add_argument("--dry-run", action="store_true", help="Evaluate scheduling decisions without dispatching jobs.")
@@ -38,6 +39,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _delta_rows_pending(trade_date) -> bool:
+    """Return whether delta rows still exist for the supplied trade date."""
     from warehouse.duckdb_connection import get_connection
 
     with get_connection(read_only=True) as conn:
@@ -49,6 +51,7 @@ def _delta_rows_pending(trade_date) -> bool:
 
 
 def main() -> None:
+    """Run the scheduler loop that dispatches intraday, EOD, ingest, and alert jobs."""
     args = parse_args()
     initialize_observability()
     cfg = load_live_update_config()
@@ -102,6 +105,8 @@ def main() -> None:
                 last_iteration_status = "success"
                 last_error_message = None
                 if is_trading_day(current):
+                    # Dispatch each due slot independently so recovery slots can be replayed
+                    # without re-running already-covered intervals.
                     floor_ts = get_plot_floor_timestamp()
                     due_slots = recent_due_intraday_slots(current)
                     latest_due_slot = due_slots[-1] if due_slots else None
@@ -143,6 +148,8 @@ def main() -> None:
                             )
                         floor_ts = get_plot_floor_timestamp()
 
+                    # After the EOD buffer time, reconcile if the daily row is stale or
+                    # intraday delta data still needs to be merged into the base dataset.
                     if current >= eod_reconcile_time(current.date()):
                         latest_daily = get_latest_daily_date()
                         if latest_daily is None or latest_daily < current.date() or _delta_rows_pending(current.date()):

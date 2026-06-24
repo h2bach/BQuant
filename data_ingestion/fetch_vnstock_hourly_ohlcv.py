@@ -29,11 +29,13 @@ REQUEST_TIMESTAMPS: deque[float] = deque()
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
+    """Load a YAML file into a dictionary."""
     with path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
 
 
 def _resolve_repo_path(path_str: str) -> Path:
+    """Resolve an absolute path or a repo-relative config path."""
     path = Path(path_str)
     if path.is_absolute():
         return path
@@ -41,11 +43,13 @@ def _resolve_repo_path(path_str: str) -> Path:
 
 
 def _load_source_config() -> dict[str, Any]:
+    """Return the configured vnstock source settings."""
     config = _load_yaml(DATA_SOURCES_CONFIG_PATH)
     return config.get("vnstock", {})
 
 
 def _load_dataset_config(dataset_name: str) -> dict[str, Any]:
+    """Load one dataset definition from the dataset registry."""
     registry = _load_yaml(DATASET_REGISTRY_PATH)
     datasets = registry.get("datasets", {})
     if dataset_name not in datasets:
@@ -54,6 +58,7 @@ def _load_dataset_config(dataset_name: str) -> dict[str, Any]:
 
 
 def _import_quote_class() -> tuple[Any, str]:
+    """Import `vnstock.api.quote.Quote` while capturing noisy startup output."""
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
         from vnstock.api.quote import Quote  # type: ignore
@@ -62,6 +67,7 @@ def _import_quote_class() -> tuple[Any, str]:
 
 
 def _call_with_suppressed_output(func: Callable[..., Any], *args: Any, **kwargs: Any) -> tuple[Any, str]:
+    """Run a callable while capturing stdout/stderr for structured logging."""
     buffer = io.StringIO()
     try:
         with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
@@ -75,14 +81,17 @@ def _call_with_suppressed_output(func: Callable[..., Any], *args: Any, **kwargs:
 
 
 def _default_start_date() -> str:
+    """Return the default hourly backfill start timestamp."""
     return "2021-01-01 09:00:00"
 
 
 def _default_end_date() -> str:
+    """Return the current local timestamp as the default hourly end bound."""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _generate_yearly_windows(start_date: str, end_date: str) -> list[tuple[str, str]]:
+    """Split a long hourly request into yearly windows for source stability."""
     start_dt = datetime.fromisoformat(start_date)
     end_dt = datetime.fromisoformat(end_date)
 
@@ -97,6 +106,7 @@ def _generate_yearly_windows(start_date: str, end_date: str) -> list[tuple[str, 
 
 
 def _respect_rate_limit(requests_per_minute: int, logger: BQuantLogger, *, symbol: str, window_start: str, window_end: str) -> None:
+    """Enforce a process-local sliding-window rate limit for vnstock requests."""
     effective_limit = max(int(requests_per_minute), 1)
     now = time.monotonic()
     while REQUEST_TIMESTAMPS and now - REQUEST_TIMESTAMPS[0] >= REQUEST_WINDOW_SECONDS:
@@ -132,6 +142,7 @@ def fetch_symbol_hourly_ohlcv(
     requests_per_minute: int,
     logger: BQuantLogger,
 ) -> pd.DataFrame:
+    """Fetch and standardize hourly OHLCV chunks for one symbol from vnstock."""
     Quote, import_notice = _import_quote_class()
     if import_notice:
         logger.warning(
@@ -155,6 +166,8 @@ def fetch_symbol_hourly_ohlcv(
             notice_excerpt=quote_notice[:500],
         )
 
+    # The source is fetched window-by-window so long lookbacks can recover partially
+    # instead of failing as one large request.
     frames: list[pd.DataFrame] = []
     windows = _generate_yearly_windows(start_date, end_date)
     runtime_notice_logged = False
@@ -249,6 +262,7 @@ def fetch_symbol_hourly_ohlcv(
 
 
 def _get_existing_hourly_keys(symbols: list[str], start_time: datetime, end_time: datetime) -> set[tuple[str, datetime, str]]:
+    """Load existing raw hourly keys for duplicate suppression."""
     placeholders = ",".join(["?"] * len(symbols))
     sql = f"""
         SELECT symbol, bar_time, source
@@ -263,6 +277,7 @@ def _get_existing_hourly_keys(symbols: list[str], start_time: datetime, end_time
 
 
 def _get_latest_bar_time(symbol: str) -> datetime | None:
+    """Return the latest saved raw hourly bar for one symbol."""
     with get_connection(read_only=True) as conn:
         value = conn.execute(
             """
@@ -278,6 +293,7 @@ def _get_latest_bar_time(symbol: str) -> datetime | None:
 
 
 def _filter_new_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only raw hourly rows that are not already stored in DuckDB."""
     if df.empty:
         return df.copy()
     symbols = sorted(df["symbol"].unique().tolist())
@@ -299,6 +315,7 @@ def _filter_new_rows(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _write_partitioned_parquet(df: pd.DataFrame) -> list[str]:
+    """Write raw hourly rows into symbol-partitioned Parquet files."""
     dataset_cfg = _load_dataset_config("raw_ohlcv_hourly")
     base_dir = _resolve_repo_path(dataset_cfg["parquet_path"])
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -315,6 +332,7 @@ def _write_partitioned_parquet(df: pd.DataFrame) -> list[str]:
 
 
 def save_raw_hourly_ohlcv(df: pd.DataFrame) -> tuple[int, list[str]]:
+    """Persist only new raw hourly rows to DuckDB and partitioned Parquet."""
     if df.empty:
         return 0, []
     new_rows = _filter_new_rows(df)
@@ -339,6 +357,7 @@ def record_pipeline_run(
     output_rows: int,
     error_message: str | None = None,
 ) -> None:
+    """Persist one pipeline-run summary row into the shared pipeline registry."""
     with get_connection(read_only=False) as conn:
         conn.execute(
             """
@@ -368,6 +387,7 @@ def record_pipeline_run(
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for vnstock hourly raw ingestion."""
     parser = argparse.ArgumentParser(description="Fetch hourly OHLCV for VN30 using vnstock.")
     parser.add_argument("--symbols", nargs="*", help="Explicit symbols to fetch.")
     parser.add_argument("--test", action="store_true", help="Use test symbols from universe config.")
@@ -384,12 +404,14 @@ def parse_args() -> argparse.Namespace:
 
 
 def _resolve_symbols(args: argparse.Namespace) -> list[str]:
+    """Resolve explicit or universe-config symbols for the current run."""
     if args.symbols:
         return [str(symbol).upper() for symbol in args.symbols]
     return get_vn30_symbols(use_test_symbols=args.test)
 
 
 def _resolve_symbol_time_range(symbol: str, args: argparse.Namespace) -> tuple[str, str]:
+    """Resolve a symbol-specific time range for full or incremental hourly fetches."""
     end_date = args.end_date
     if not args.incremental:
         return args.start_date, end_date
@@ -406,6 +428,7 @@ def _resolve_symbol_time_range(symbol: str, args: argparse.Namespace) -> tuple[s
 
 
 def main() -> None:
+    """Fetch, deduplicate, and persist raw hourly OHLCV rows from vnstock."""
     args = parse_args()
     logger = BQuantLogger(PIPELINE_NAME)
     source_cfg = _load_source_config()

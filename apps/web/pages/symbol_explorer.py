@@ -30,7 +30,7 @@ def render_symbol_explorer(client: Client):
         with ui.row().classes("items-center gap-3"):
             symbol_select = ui.select(options=symbols, value=symbols[0] if symbols else None).classes("w-36")
             mode_select = ui.select(options=["daily", "intraday"], value="daily").classes("w-32")
-            range_select = ui.select(options=SYMBOL_DAILY_RANGE_OPTIONS, value="1Y").classes("w-28")
+            range_select = ui.select(options=SYMBOL_DAILY_RANGE_OPTIONS, value="10Y").classes("w-32")
             ui.button("Load", on_click=lambda: render_symbol_workspace())
 
     ui.separator()
@@ -47,17 +47,19 @@ def render_symbol_explorer(client: Client):
         ).props(':rows-per-page-options="[15, 20, 50]"')
 
     def sync_range_options() -> None:
+        """Swap the range presets when the user toggles between daily and intraday modes."""
         options = SYMBOL_DAILY_RANGE_OPTIONS if mode_select.value == "daily" else SYMBOL_INTRADAY_RANGE_OPTIONS
-        default_value = "1Y" if mode_select.value == "daily" else "20D"
+        default_value = "10Y" if mode_select.value == "daily" else "20D"
         range_select.options = options
         if range_select.value not in options:
             range_select.value = default_value
         range_select.update()
 
     def render_symbol_workspace() -> None:
+        """Render metrics, chart, and OHLCV table for the selected symbol and range."""
         symbol = symbol_select.value
         mode = mode_select.value or "daily"
-        period_key = range_select.value or ("1Y" if mode == "daily" else "20D")
+        period_key = range_select.value or ("10Y" if mode == "daily" else "20D")
 
         if not symbol:
             ui.notify("Please select a symbol first", position="top", type="warning")
@@ -138,13 +140,15 @@ def build_table_columns(mode: str) -> list[dict[str, str | bool]]:
 
 
 def _row_limit(mode: str, period_key: str) -> int:
+    """Return a table row budget aligned with the active chart range."""
     daily_limits = {
         "3M": 70,
         "6M": 140,
         "1Y": 260,
         "3Y": 780,
         "5Y": 1300,
-        "ALL": 2000,
+        "10Y": 2600,
+        "ALL": 5000,
     }
     intraday_limits = {
         "5D": 140,

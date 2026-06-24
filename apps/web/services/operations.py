@@ -31,11 +31,13 @@ ACTION_MAP = {
 
 
 def ensure_operations_ready() -> None:
+    """Initialize the observability store on first access if it is still absent."""
     if not Path(get_observability_db_path()).exists():
         initialize_observability()
 
 
 def load_operations_snapshot() -> dict[str, Any]:
+    """Assemble the current monitoring snapshot for the operations dashboard."""
     ensure_operations_ready()
     snapshot: dict[str, Any] = {
         "market_session_state": market_session_state(now_local()),
@@ -202,6 +204,7 @@ def load_alerts(
     dataset_filter: str = "all",
     symbol_filter: str = "",
 ) -> list[dict[str, str]]:
+    """Load alert rows using the current UI filters."""
     ensure_operations_ready()
     clauses = ["1=1"]
     params: list[Any] = []
@@ -249,6 +252,7 @@ def load_alerts(
 
 
 def alert_keys(status_filter: str = "open") -> list[str]:
+    """Return alert keys for dropdown selection, optionally filtered by status."""
     ensure_operations_ready()
     sql = "SELECT alert_key FROM obs_alerts"
     params: list[Any] = []
@@ -262,6 +266,7 @@ def alert_keys(status_filter: str = "open") -> list[str]:
 
 
 def trigger_action(action_name: str) -> int:
+    """Spawn a supported maintenance action and return the child PID."""
     ensure_operations_ready()
     if action_name not in ACTION_MAP:
         raise ValueError(f"Unsupported operations action: {action_name}")
@@ -283,6 +288,7 @@ def trigger_action(action_name: str) -> int:
 
 
 def trigger_alert_transition(alert_key: str, target_status: str) -> int:
+    """Submit an alert acknowledgement or resolution action."""
     ensure_operations_ready()
     if target_status not in {"acknowledged", "resolved"}:
         raise ValueError(f"Unsupported alert transition: {target_status}")

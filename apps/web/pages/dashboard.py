@@ -5,7 +5,7 @@ from __future__ import annotations
 from nicegui import ui
 from nicegui.client import Client
 
-from apps.web.services.charting import OVERVIEW_PERIOD_OPTIONS, build_market_overview_chart
+from apps.web.services.charting import MARKET_CANDLE_OPTIONS, OVERVIEW_PERIOD_OPTIONS, build_market_overview_chart
 from utils.logger import BQuantLogger
 from warehouse.duckdb_connection import get_connection
 
@@ -31,11 +31,16 @@ def render_dashboard(client: Client):
             ui.button("Operations", on_click=lambda: ui.navigate.to("/operations"))
             ui.button("Alerts", on_click=lambda: ui.navigate.to("/alerts"))
         with ui.row().classes("items-center gap-3"):
+            ui.label("Candlestick").classes("text-sm text-slate-400")
+            candle_select = ui.select(
+                options=MARKET_CANDLE_OPTIONS,
+                value="VN30",
+            ).classes("w-32")
             ui.label("Range").classes("text-sm text-slate-400")
             period_select = ui.select(
                 options=OVERVIEW_PERIOD_OPTIONS,
-                value="1Y",
-            ).classes("w-28")
+                value="10Y",
+            ).classes("w-32")
 
     ui.separator()
     ui.label("Market Overview").classes("text-2xl font-semibold")
@@ -45,17 +50,24 @@ def render_dashboard(client: Client):
     chart_container = ui.column().classes("w-full")
 
     def render_market_overview() -> None:
+        """Rebuild the market overview metrics, note, and chart from current controls."""
         metrics_container.clear()
         note_container.clear()
         chart_container.clear()
         try:
-            figure, metrics, note = build_market_overview_chart(period_select.value or "1Y")
+            figure, metrics, note = build_market_overview_chart(
+                period_select.value or "10Y",
+                candle_select.value or "VN30",
+            )
         except Exception as exc:
             LOGGER.log_error(
                 "render_market_overview",
                 type(exc).__name__,
                 str(exc),
-                context={"period_key": period_select.value or "1Y"},
+                context={
+                    "period_key": period_select.value or "10Y",
+                    "candle_source": candle_select.value or "VN30",
+                },
                 channel="web",
             )
             with chart_container:
@@ -76,6 +88,7 @@ def render_dashboard(client: Client):
             with ui.card().classes("w-full"):
                 ui.plotly(figure).classes("w-full")
 
+    candle_select.on_value_change(lambda _: render_market_overview())
     period_select.on_value_change(lambda _: render_market_overview())
     render_market_overview()
 

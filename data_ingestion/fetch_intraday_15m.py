@@ -13,7 +13,7 @@ from typing import Any
 import pandas as pd
 import yaml
 
-from data_ingestion.fetch_vn30_universe import DEFAULT_CONFIG_PATH, _load_yaml
+from data_ingestion.fetch_vn30_universe import DEFAULT_CONFIG_PATH
 from data_ingestion.yfinance_adapter import fetch_intraday_history, source_config
 from utils.logger import BQuantLogger
 from utils.rate_limit import SlidingWindowRateLimiter
@@ -28,29 +28,36 @@ PIPELINE_NAME = "fetch_intraday_15m"
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
+    """Load a YAML file into a dictionary."""
     with path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
 
 
 def _source_config() -> dict[str, Any]:
+    """Return the yfinance source configuration for intraday ingestion."""
     return source_config()
 
 
 def _management_config(mode: str) -> dict[str, Any]:
+    """Return dataset-management settings for either base or delta intraday mode."""
     dataset_name = "intraday_ohlcv_15m_60d" if mode == "base" else "intraday_ohlcv_15m_delta"
     return _load_yaml(DATA_MANAGEMENT_PATH).get("datasets", {}).get(dataset_name, {})
 
+
 def _default_base_start_date() -> str:
+    """Return the default base backfill start time for the configured intraday window."""
     lookback_days = int(_source_config().get("parameters", {}).get("intraday_window_days", 60))
     start = datetime.now() - timedelta(days=lookback_days)
     return start.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _default_end_date() -> str:
+    """Return the current local timestamp as the default intraday end bound."""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for intraday base or delta ingestion."""
     parser = argparse.ArgumentParser(description="Fetch 15m intraday base or delta datasets.")
     parser.add_argument("--mode", choices=["base", "delta"], default="base")
     parser.add_argument("--symbols", nargs="*", help="Explicit symbols to fetch.")
@@ -62,6 +69,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _resolve_symbols(args: argparse.Namespace) -> list[str]:
+    """Resolve explicit or universe-config symbols for the current run."""
     if args.symbols:
         return [str(symbol).upper() for symbol in args.symbols]
     payload = _load_yaml(DEFAULT_CONFIG_PATH)
@@ -73,6 +81,7 @@ def _resolve_symbols(args: argparse.Namespace) -> list[str]:
 
 
 def _get_latest_bar_time(symbol: str, table_name: str) -> datetime | None:
+    """Return the latest saved intraday bar for one symbol/table pair."""
     with get_connection(read_only=True) as conn:
         value = conn.execute(
             f"SELECT max(bar_time) FROM {table_name} WHERE symbol = ?",
@@ -84,11 +93,14 @@ def _get_latest_bar_time(symbol: str, table_name: str) -> datetime | None:
 
 
 def _resolve_symbol_start(symbol: str, args: argparse.Namespace) -> str:
+    """Resolve a symbol-specific start timestamp for base or incremental delta mode."""
     if args.start_date:
         return args.start_date
     if args.mode == "base":
         return _default_base_start_date()
 
+    # Delta mode walks forward from the most recent saved bar, preferring the delta
+    # table first and falling back to the base table if the delta table is empty.
     latest_delta = _get_latest_bar_time(symbol, "intraday_ohlcv_15m_delta")
     if latest_delta is not None:
         return (latest_delta + timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M:%S")
@@ -99,6 +111,7 @@ def _resolve_symbol_start(symbol: str, args: argparse.Namespace) -> str:
 
     return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S")
 
+
 def _fetch_symbol(
     symbol: str,
     start_date: str,
@@ -107,6 +120,7 @@ def _fetch_symbol(
     limiter: SlidingWindowRateLimiter,
     logger: BQuantLogger,
 ) -> pd.DataFrame:
+    """Fetch one symbol's intraday history with rate limiting and source logging."""
     try:
         waited = limiter.acquire()
         if waited > 0:
@@ -150,6 +164,7 @@ def _fetch_symbol(
 
 
 def _delete_existing_slice(conn, table_name: str, symbol: str, start_time: Any, end_time: Any) -> None:
+    """Delete the target intraday slice before re-inserting refreshed rows."""
     conn.execute(
         f"""
         DELETE FROM {table_name}
@@ -161,10 +176,13 @@ def _delete_existing_slice(conn, table_name: str, symbol: str, start_time: Any, 
 
 
 def upsert_intraday_rows(table_name: str, df: pd.DataFrame) -> int:
+    """Replace the affected intraday slices in the requested base or delta table."""
     if df.empty:
         return 0
 
     with get_connection(read_only=False) as conn:
+        # Deleting the overlapping slice first keeps reruns idempotent for both
+        # base backfills and rolling delta refreshes.
         for symbol, symbol_df in df.groupby("symbol", sort=True):
             _delete_existing_slice(
                 conn,
@@ -217,6 +235,7 @@ def record_pipeline_run(
     output_rows: int,
     error_message: str | None = None,
 ) -> None:
+    """Persist one pipeline-run summary row into the shared pipeline registry."""
     with get_connection(read_only=False) as conn:
         conn.execute(
             """
@@ -246,6 +265,7 @@ def record_pipeline_run(
 
 
 def main() -> None:
+    """Fetch, upsert, and materialize the configured 15-minute intraday dataset."""
     args = parse_args()
     source_cfg = _source_config()
     mgmt_cfg = _management_config(args.mode)

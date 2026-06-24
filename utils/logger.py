@@ -20,6 +20,7 @@ OBSERVABILITY_CONFIG_PATH = REPO_ROOT / "configs" / "observability.yaml"
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
+    """Load a YAML file into a dictionary, returning an empty mapping if absent."""
     if not path.exists():
         return {}
     with path.open("r", encoding="utf-8") as handle:
@@ -27,6 +28,7 @@ def _load_yaml(path: Path) -> dict[str, Any]:
 
 
 def _load_logging_config() -> dict[str, Any]:
+    """Load base logging paths and levels from the main BQuant config."""
     config = _load_yaml(BQUANT_CONFIG_PATH)
     return config.get(
         "logging",
@@ -41,6 +43,7 @@ def _load_logging_config() -> dict[str, Any]:
 
 
 def _load_observability_config() -> dict[str, Any]:
+    """Load observability-specific channel paths and retention locations."""
     config = _load_yaml(OBSERVABILITY_CONFIG_PATH)
     return config or {
         "logs": {
@@ -61,6 +64,7 @@ def _load_observability_config() -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class LogPaths:
+    """Resolved filesystem locations used by both legacy logs and observability logs."""
     base_dir: Path
     data_dir: Path
     pipeline_dir: Path
@@ -88,6 +92,7 @@ class BQuantLogger:
         _shared_config: dict[str, Any] | None = None,
         _shared_obs_config: dict[str, Any] | None = None,
     ) -> None:
+        """Build a structured logger with optional shared context and shared handlers."""
         self.name = name
         self.config = _shared_config or _load_logging_config()
         self.obs_config = _shared_obs_config or _load_observability_config()
@@ -100,6 +105,7 @@ class BQuantLogger:
         self.logger = _shared_logger or self._setup_logger()
 
     def _build_paths(self) -> LogPaths:
+        """Resolve every configured logging path once per logger family."""
         obs_logs = self.obs_config.get("logs", {})
         obs_channels_cfg = obs_logs.get("channels", {})
         observability_channels = {
@@ -119,6 +125,7 @@ class BQuantLogger:
         )
 
     def _ensure_directories(self) -> None:
+        """Create every directory the logger may need before the first event is written."""
         directories = [
             self.paths.base_dir,
             self.paths.data_dir,
@@ -139,6 +146,7 @@ class BQuantLogger:
             directory.mkdir(parents=True, exist_ok=True)
 
     def _setup_logger(self) -> logging.Logger:
+        """Create the console logger used alongside JSONL/text file outputs."""
         logger = logging.getLogger(f"bquant.{self.component}.{self.subcomponent}")
         logger.setLevel(getattr(logging, self.config.get("level", "INFO").upper(), logging.INFO))
         logger.propagate = False
@@ -177,6 +185,7 @@ class BQuantLogger:
         return mapping.get(component, "pipeline")
 
     def with_run_context(self, **context: Any) -> BQuantLogger:
+        """Return a lightweight child logger that carries merged default context."""
         merged_context = {**self.default_context, **context}
         return BQuantLogger(
             self.name,
@@ -253,6 +262,7 @@ class BQuantLogger:
         data_subcategory: str | None = None,
         **payload: Any,
     ) -> dict[str, Any]:
+        """Write one structured event to observability channels and legacy text/JSON logs."""
         merged_payload = {**self.default_context, **payload}
         now = datetime.now()
 
@@ -323,6 +333,7 @@ class BQuantLogger:
         return self.emit_event(message, level=logging.CRITICAL, legacy_category="error", **payload)
 
     def log_data_event(self, subcategory: str, message: str, **payload: Any) -> dict[str, Any]:
+        """Emit a data-ingestion or validation event with the correct channel routing."""
         channel = "ingestion" if subcategory in {"ingestion", "validation"} else "pipeline"
         return self.emit_event(
             message,
@@ -334,6 +345,7 @@ class BQuantLogger:
         )
 
     def log_web_event(self, message: str, **payload: Any) -> dict[str, Any]:
+        """Emit an informational web event into the web observability channel."""
         return self.emit_event(
             message,
             level=logging.INFO,
@@ -343,6 +355,7 @@ class BQuantLogger:
         )
 
     def log_scheduler_event(self, message: str, **payload: Any) -> dict[str, Any]:
+        """Emit a scheduler/worker event into the scheduler observability channel."""
         return self.emit_event(
             message,
             level=logging.INFO,
@@ -352,6 +365,7 @@ class BQuantLogger:
         )
 
     def log_alert_event(self, message: str, **payload: Any) -> dict[str, Any]:
+        """Emit an alert lifecycle event with severity derived from alert status."""
         return self.emit_event(
             message,
             level=logging.WARNING if payload.get("status") == "open" else logging.INFO,
@@ -371,6 +385,7 @@ class BQuantLogger:
         error_message: str | None = None,
         **extra: Any,
     ) -> dict[str, Any]:
+        """Emit a normalized pipeline-run summary event with status-aware severity."""
         message = (
             f"Pipeline {pipeline_name} finished with status={status}; "
             f"completed={len(steps_completed)} failed={len(steps_failed)}"
@@ -411,6 +426,7 @@ class BQuantLogger:
         context: dict[str, Any] | None = None,
         channel: str | None = None,
     ) -> dict[str, Any]:
+        """Emit a structured error event with operation, type, and context payload."""
         payload = context.copy() if context else {}
         payload.update(
             {

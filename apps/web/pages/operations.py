@@ -13,6 +13,7 @@ LOGGER = BQuantLogger("web_operations_page", component="web", subcomponent="oper
 
 
 def render_operations(client: Client):
+    """Render the operations dashboard and safe manual control actions."""
     del client
     ui.label("Operations").classes("text-4xl font-bold")
     ui.label("Live update health, recent jobs, checkpoints, and safe control actions.").classes(
@@ -42,6 +43,7 @@ def render_operations(client: Client):
     errors_container = ui.card().classes("w-full")
 
     def _trigger(action_name: str) -> None:
+        """Submit an allowed maintenance action through the operations service."""
         try:
             pid = trigger_action(action_name)
             ui.notify(f"{action_name} submitted (pid={pid})", type="positive", position="top")
@@ -56,6 +58,7 @@ def render_operations(client: Client):
             ui.notify(f"Failed to trigger {action_name}: {exc}", type="negative", position="top")
 
     def render_snapshot() -> None:
+        """Reload the operations snapshot and redraw all monitoring tables/cards."""
         summary_container.clear()
         refresh_container.clear()
         source_container.clear()

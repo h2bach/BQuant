@@ -25,11 +25,13 @@ PIPELINE_NAME = "fetch_vn30_universe"
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
+    """Load a YAML file into a dictionary."""
     with path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
 
 
 def _load_dataset_config(dataset_name: str) -> dict[str, Any]:
+    """Load one dataset definition from the dataset registry."""
     registry = _load_yaml(DATASET_REGISTRY_PATH)
     datasets = registry.get("datasets", {})
     if dataset_name not in datasets:
@@ -38,6 +40,7 @@ def _load_dataset_config(dataset_name: str) -> dict[str, Any]:
 
 
 def _resolve_repo_path(path_str: str) -> Path:
+    """Resolve an absolute path or a repo-relative config path."""
     path = Path(path_str)
     if path.is_absolute():
         return path
@@ -45,6 +48,7 @@ def _resolve_repo_path(path_str: str) -> Path:
 
 
 def _clear_output_dir(directory: Path) -> None:
+    """Remove all files and subdirectories from a dataset output directory."""
     if not directory.exists():
         return
     for child in directory.iterdir():
@@ -117,6 +121,7 @@ def record_pipeline_run(
     output_rows: int,
     error_message: str | None = None,
 ) -> None:
+    """Persist one pipeline-run summary row into the shared pipeline registry."""
     with get_connection(read_only=False) as conn:
         conn.execute(
             """
@@ -146,6 +151,7 @@ def record_pipeline_run(
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for VN30 universe ingestion."""
     parser = argparse.ArgumentParser(description="Load VN30 universe membership into DuckDB and Parquet.")
     parser.add_argument(
         "--config-path",
@@ -161,6 +167,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    """Load, persist, and export the VN30 universe membership dataset."""
     args = parse_args()
     logger = BQuantLogger(PIPELINE_NAME)
     start_time = datetime.now()

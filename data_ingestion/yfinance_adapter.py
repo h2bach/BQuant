@@ -17,21 +17,25 @@ DATA_SOURCES_CONFIG_PATH = REPO_ROOT / "configs" / "data_sources.yaml"
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
+    """Load a YAML config file into a dictionary."""
     with path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
 
 
 def source_config() -> dict[str, Any]:
+    """Return the yfinance source configuration block."""
     return _load_yaml(DATA_SOURCES_CONFIG_PATH).get("yfinance", {})
 
 
 def symbol_to_ticker(symbol: str) -> str:
+    """Map a local exchange symbol to the configured Yahoo Finance ticker format."""
     suffix = str(source_config().get("parameters", {}).get("symbol_suffix", ".VN"))
     symbol = str(symbol).upper()
     return symbol if symbol.endswith(suffix) else f"{symbol}{suffix}"
 
 
 def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Flatten multi-index Yahoo columns into a simple OHLCV column set."""
     if isinstance(df.columns, pd.MultiIndex):
         df = df.copy()
         df.columns = [column[0] if isinstance(column, tuple) else column for column in df.columns]
@@ -39,6 +43,7 @@ def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _download_with_retry(**kwargs: Any) -> pd.DataFrame:
+    """Call `yf.download` with config-driven retry and backoff behavior."""
     cfg = source_config()
     retries = int(cfg.get("rate_limit", {}).get("retry_attempts", 3))
     delay = int(cfg.get("rate_limit", {}).get("retry_delay_seconds", 3))
@@ -58,6 +63,7 @@ def _download_with_retry(**kwargs: Any) -> pd.DataFrame:
 
 
 def _repair_ohlc_bounds(frame: pd.DataFrame) -> pd.DataFrame:
+    """Repair high/low bounds so each row remains internally consistent."""
     output = frame.copy()
     output["high"] = output[["open", "high", "low", "close"]].max(axis=1)
     output["low"] = output[["open", "high", "low", "close"]].min(axis=1)
@@ -65,6 +71,7 @@ def _repair_ohlc_bounds(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def fetch_daily_history(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """Fetch standardized daily OHLCV history for one symbol from yfinance."""
     ticker = symbol_to_ticker(symbol)
     params = source_config().get("parameters", {})
     end_exclusive = (datetime.fromisoformat(end_date).date() + timedelta(days=1)).isoformat()
@@ -117,12 +124,15 @@ def fetch_daily_history(symbol: str, start_date: str, end_date: str) -> pd.DataF
 
 
 def fetch_intraday_history(symbol: str, start_date: str, end_date: str, interval: str = "15m") -> pd.DataFrame:
+    """Fetch standardized intraday OHLCV history for one symbol from yfinance."""
     ticker = symbol_to_ticker(symbol)
     params = source_config().get("parameters", {})
     lookback_days = int(params.get("intraday_window_days", 60))
     start_dt = pd.to_datetime(start_date, errors="coerce")
     end_dt = pd.to_datetime(end_date, errors="coerce")
 
+    # Yahoo intraday history is constrained by rolling lookback windows. Prefer the
+    # native `period` form when the request spans the configured full window.
     download_kwargs: dict[str, Any] = {
         "tickers": ticker,
         "interval": interval or str(params.get("intraday_interval", "15m")),
@@ -160,6 +170,7 @@ def fetch_intraday_history(symbol: str, start_date: str, end_date: str, interval
     frame = df.reset_index().rename(columns={"Datetime": "bar_time", "Date": "bar_time"})
     bar_time = pd.to_datetime(frame["bar_time"], errors="coerce")
     if getattr(bar_time.dt, "tz", None) is not None:
+        # Normalize all downstream intraday timestamps to local naive exchange time.
         bar_time = bar_time.dt.tz_convert("Asia/Ho_Chi_Minh").dt.tz_localize(None)
     frame["bar_time"] = bar_time
     frame["session_date"] = frame["bar_time"].dt.date

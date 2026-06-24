@@ -13,6 +13,7 @@ LOGGER = BQuantLogger("web_alerts_page", component="web", subcomponent="alerts_p
 
 
 def render_alerts(client: Client):
+    """Render the alerts workspace with filters and acknowledgement controls."""
     del client
     ui.label("Alerts").classes("text-4xl font-bold")
     ui.label("Active and historical observability alerts with acknowledgement controls.").classes(
@@ -56,6 +57,7 @@ def render_alerts(client: Client):
     ).classes("w-full")
 
     def _trigger_eval() -> None:
+        """Request a fresh alert evaluation run from the operations service."""
         try:
             pid = trigger_action("evaluate_alerts")
             ui.notify(f"evaluate_alerts submitted (pid={pid})", type="positive", position="top")
@@ -70,6 +72,7 @@ def render_alerts(client: Client):
             ui.notify(f"Failed to trigger alert evaluation: {exc}", type="negative", position="top")
 
     def _transition(target_status: str) -> None:
+        """Submit an alert lifecycle transition for the selected alert key."""
         if not selected_alert.value:
             ui.notify("Select an alert key first", type="warning", position="top")
             return
@@ -87,6 +90,7 @@ def render_alerts(client: Client):
             ui.notify(f"Failed to change alert status: {exc}", type="negative", position="top")
 
     def render_table() -> None:
+        """Reload the alert table from the current UI filters."""
         try:
             rows = load_alerts(
                 status_filter=str(status_select.value or "all"),
