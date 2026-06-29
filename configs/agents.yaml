@@ -1,0 +1,47 @@
+# BQuant Agentic AI configuration.
+#
+# v1 runs deterministic agents over dbt marts. LLM/model-backed agents can be
+# plugged in later without changing the data contract.
+
+runtime:
+  enabled: true
+  mode: deterministic
+  llm_backend: disabled
+  context_table: analytics_marts.mart_agent_context_daily
+  recommendation_table: agent_recommendations
+  run_table: agent_recommendation_runs
+
+universe:
+  name: VN30
+  top_n: 10
+
+thresholds:
+  max_stale_days: 5
+  min_confidence: 0.35
+  candidate_score: 0.60
+  risk_off_score: 0.25
+
+agents:
+  data_quality_agent:
+    enabled: true
+    blocks_on_quality_failure: true
+  market_regime_agent:
+    enabled: true
+    bullish_bonus: 0.15
+    bearish_penalty: 0.25
+    high_volatility_penalty: 0.10
+  symbol_signal_agent:
+    enabled: true
+    weights:
+      trend: 0.25
+      relative_strength: 0.25
+      momentum: 0.20
+      volatility: 0.15
+      liquidity: 0.15
+  portfolio_optimizer_agent:
+    enabled: true
+    mode: classical_fallback
+    qaoa_enabled: false
+    max_positions: 10
+    max_weight: 0.15
+    min_weight: 0.02

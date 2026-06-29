@@ -304,6 +304,41 @@ CREATE INDEX IF NOT EXISTS idx_trading_signals_signal ON trading_signals(signal)
 CREATE INDEX IF NOT EXISTS idx_trading_signals_final_score ON trading_signals(final_score);
 
 -- ============================================
+-- Agent Recommendation Tables
+-- ============================================
+CREATE TABLE IF NOT EXISTS agent_recommendation_runs (
+    run_id VARCHAR PRIMARY KEY,
+    as_of_date DATE NOT NULL,
+    trigger_type VARCHAR NOT NULL,
+    status VARCHAR NOT NULL,
+    input_rows INTEGER NOT NULL DEFAULT 0,
+    output_rows INTEGER NOT NULL DEFAULT 0,
+    agent_version VARCHAR NOT NULL,
+    optimizer_mode VARCHAR,
+    qaoa_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    notes VARCHAR,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS agent_recommendations (
+    run_id VARCHAR NOT NULL,
+    as_of_date DATE NOT NULL,
+    symbol VARCHAR NOT NULL,
+    recommendation VARCHAR NOT NULL,
+    confidence DOUBLE NOT NULL,
+    score DOUBLE NOT NULL,
+    risk_level VARCHAR NOT NULL,
+    suggested_weight DOUBLE NOT NULL DEFAULT 0,
+    rationale_json VARCHAR NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (run_id, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_recommendation_runs_date ON agent_recommendation_runs(as_of_date);
+CREATE INDEX IF NOT EXISTS idx_agent_recommendations_date ON agent_recommendations(as_of_date);
+CREATE INDEX IF NOT EXISTS idx_agent_recommendations_symbol ON agent_recommendations(symbol);
+
+-- ============================================
 -- Backtest Runs Table
 -- ============================================
 CREATE TABLE IF NOT EXISTS backtest_runs (
@@ -384,6 +419,21 @@ WHERE signal_date = (
     SELECT MAX(signal_date) FROM trading_signals
 )
 ORDER BY final_score DESC;
+
+-- View: Latest agent recommendations
+CREATE OR REPLACE VIEW v_latest_agent_recommendations AS
+WITH latest_run AS (
+    SELECT run_id
+    FROM agent_recommendation_runs
+    WHERE status = 'success'
+    ORDER BY created_at DESC
+    LIMIT 1
+)
+SELECT recommendations.*
+FROM agent_recommendations recommendations
+INNER JOIN latest_run
+  ON recommendations.run_id = latest_run.run_id
+ORDER BY recommendations.suggested_weight DESC, recommendations.score DESC, recommendations.symbol;
 
 -- View: Universe members as of a date
 CREATE OR REPLACE VIEW v_universe_members AS

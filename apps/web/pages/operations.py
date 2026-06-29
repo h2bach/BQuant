@@ -30,6 +30,7 @@ def render_operations(client: Client):
         ui.button("Run Intraday Delta", on_click=lambda: _trigger("run_intraday_delta"))
         ui.button("Run EOD Reconcile", on_click=lambda: _trigger("run_eod_reconcile"))
         ui.button("Run dbt Transforms", on_click=lambda: _trigger("run_dbt_transforms"))
+        ui.button("Run Agent Cycle", on_click=lambda: _trigger("run_agent_cycle"))
         ui.button("Re-ingest Logs", on_click=lambda: _trigger("ingest_observability_logs"))
         ui.button("Refresh Manifest", on_click=lambda: _trigger("refresh_manifest"))
         ui.button("Re-evaluate Alerts", on_click=lambda: _trigger("evaluate_alerts"))

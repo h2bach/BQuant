@@ -62,3 +62,6 @@ post_update:
     test_on_intraday_delta: false
     test_on_eod_reconcile: true
     command: dbt
+  agents:
+    enabled: true
+    run_on_eod_reconcile: true

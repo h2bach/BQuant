@@ -65,6 +65,8 @@ def verify_database_state() -> dict[str, object]:
         "technical_features_daily",
         "combined_features_daily",
         "trading_signals",
+        "agent_recommendation_runs",
+        "agent_recommendations",
         "backtest_runs",
         "pipeline_runs",
         "dataset_refresh_state",
@@ -72,6 +74,7 @@ def verify_database_state() -> dict[str, object]:
     ]
     expected_views = [
         "v_latest_signals",
+        "v_latest_agent_recommendations",
         "v_universe_members",
         "v_clean_ohlcv_universe",
         "v_clean_ohlcv_hourly_universe",

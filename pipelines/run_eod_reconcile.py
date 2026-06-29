@@ -225,6 +225,7 @@ def run_eod_reconcile(
     total_fetched_rows = 0
     total_saved_rows = 0
     dbt_result = None
+    agent_result = None
 
     if not is_trading_day(trade_date) and trigger_type != "manual":
         record_pipeline_run(
@@ -503,6 +504,16 @@ def run_eod_reconcile(
             )
             steps_completed.append("run_dbt_transforms")
 
+        agent_cfg = cfg.get("post_update", {}).get("agents", {})
+        if agent_cfg.get("enabled", False) and agent_cfg.get("run_on_eod_reconcile", True):
+            from agents.orchestrator import run_agent_cycle
+
+            agent_result = run_agent_cycle(
+                as_of_date=None,
+                trigger_type=trigger_type,
+            )
+            steps_completed.append("run_agent_cycle")
+
         finished_at = datetime.now()
         record_pipeline_run(
             run_id=run_id,
@@ -560,6 +571,7 @@ def run_eod_reconcile(
             duration_seconds=round(time.perf_counter() - perf_started, 3),
             trade_date=trade_date.isoformat(),
             dbt_result=dbt_result,
+            agent_result=agent_result,
         )
 
         if run_post_hooks:
@@ -574,6 +586,7 @@ def run_eod_reconcile(
             "rows_fetched": total_fetched_rows + int(len(delta_df)),
             "rows_saved": total_saved_rows,
             "dbt_result": dbt_result,
+            "agent_result": agent_result,
         }
     except Exception as exc:
         finished_at = datetime.now()
