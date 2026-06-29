@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
+import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
 from utils.logger import BQuantLogger
 from warehouse.init_observability import initialize_observability
@@ -23,11 +26,10 @@ from pipelines.live_update_runtime import (
     recent_due_intraday_slots,
     record_pipeline_run,
 )
-from pipelines.run_eod_reconcile import run_eod_reconcile
-from pipelines.run_intraday_delta import run_intraday_delta
 
 
 PIPELINE_NAME = "live_update_worker"
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def parse_args() -> argparse.Namespace:
@@ -48,6 +50,22 @@ def _delta_rows_pending(trade_date) -> bool:
             [trade_date],
         ).fetchone()[0]
     return bool(count)
+
+
+def _run_pipeline_module(module_name: str, args: list[str]) -> None:
+    """Run one pipeline CLI in an isolated child process.
+
+    Args:
+        module_name: Python module to execute with `python -m`.
+        args: CLI arguments passed after the module name.
+
+    Raises:
+        RuntimeError: If the child process exits non-zero.
+    """
+    command = [sys.executable, "-m", module_name, *args]
+    completed = subprocess.run(command, cwd=REPO_ROOT, check=False)
+    if completed.returncode != 0:
+        raise RuntimeError(f"{module_name} exited with returncode={completed.returncode}")
 
 
 def main() -> None:
@@ -155,7 +173,15 @@ def main() -> None:
                         )
                         slot_attempted_at[slot_key] = now_ts
                         if not args.dry_run:
-                            run_intraday_delta(slot_dt=slot_dt, trigger_type=trigger_type, run_post_hooks=True)
+                            _run_pipeline_module(
+                                "pipelines.run_intraday_delta",
+                                [
+                                    "--slot-time",
+                                    slot_dt.isoformat(),
+                                    "--trigger-type",
+                                    trigger_type,
+                                ],
+                            )
                         else:
                             logger.log_scheduler_event(
                                 "Dry-run mode: skipped intraday delta dispatch",
@@ -199,10 +225,14 @@ def main() -> None:
                                 )
                                 eod_attempted_at[eod_key] = now_ts
                                 if not args.dry_run:
-                                    run_eod_reconcile(
-                                        trade_date=current.date(),
-                                        trigger_type="scheduled",
-                                        run_post_hooks=True,
+                                    _run_pipeline_module(
+                                        "pipelines.run_eod_reconcile",
+                                        [
+                                            "--trade-date",
+                                            current.date().isoformat(),
+                                            "--trigger-type",
+                                            "scheduled",
+                                        ],
                                     )
                                 else:
                                     logger.log_scheduler_event(
