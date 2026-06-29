@@ -153,9 +153,9 @@ def main() -> None:
                             worker_name=worker_name,
                             slot_time=slot_dt.isoformat(),
                         )
+                        slot_attempted_at[slot_key] = now_ts
                         if not args.dry_run:
                             run_intraday_delta(slot_dt=slot_dt, trigger_type=trigger_type, run_post_hooks=True)
-                            slot_attempted_at[slot_key] = now_ts
                         else:
                             logger.log_scheduler_event(
                                 "Dry-run mode: skipped intraday delta dispatch",
@@ -166,7 +166,6 @@ def main() -> None:
                                 worker_name=worker_name,
                                 slot_time=slot_dt.isoformat(),
                             )
-                            slot_attempted_at[slot_key] = now_ts
                         floor_ts = get_plot_floor_timestamp()
 
                     # After the EOD buffer time, reconcile if the daily row is stale or

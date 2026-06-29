@@ -16,7 +16,7 @@ if tmux has-session -t "${SESSION_NAME}" 2>/dev/null; then
 fi
 
 tmux new-session -d -s "${SESSION_NAME}" \
-  "cd '${REPO_ROOT}' && conda run -n '${CONDA_ENV}' python -m pipelines.live_update_worker 2>&1 | tee -a '${LOG_PATH}'"
+  "cd '${REPO_ROOT}' && source \"\$(conda info --base)/etc/profile.d/conda.sh\" && conda activate '${CONDA_ENV}' && python -m pipelines.live_update_worker 2>&1 | tee -a '${LOG_PATH}'"
 
 echo "started tmux session: ${SESSION_NAME}"
 echo "log: ${LOG_PATH}"
