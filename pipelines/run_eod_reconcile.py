@@ -7,9 +7,11 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, time as dtime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import yaml
 
 from data_ingestion.vnstock_adapter import DEFAULT_SOURCE, DEFAULT_SOURCE_LABEL, fetch_daily_history
 from data_ingestion.fetch_daily_10y_base import upsert_daily_rows
@@ -44,6 +46,17 @@ from pipelines.live_update_runtime import (
 
 PIPELINE_NAME = "run_eod_reconcile"
 MARKET_INDEX_DATASET_NAME = "market_index_daily_10y"
+DATA_SOURCES_CONFIG_PATH = Path(__file__).resolve().parent.parent / "configs" / "data_sources.yaml"
+
+
+def source_config() -> dict[str, Any]:
+    """Return the canonical vnstock source configuration for EOD jobs.
+
+    Returns:
+        `configs/data_sources.yaml` block keyed by `vnstock`.
+    """
+    with DATA_SOURCES_CONFIG_PATH.open("r", encoding="utf-8") as handle:
+        return (yaml.safe_load(handle) or {}).get("vnstock", {})
 
 
 def parse_args() -> argparse.Namespace:
@@ -128,7 +141,9 @@ def _fetch_symbol_daily_latest(
             trade_date=trade_date.isoformat(),
         )
         return frame
-    except Exception as exc:
+    except BaseException as exc:
+        if isinstance(exc, KeyboardInterrupt):
+            raise
         request_end = datetime.now()
         logger.emit_event(
             f"Daily source request failed for {symbol}",
@@ -254,7 +269,7 @@ def run_eod_reconcile(
 
     target_symbols = resolve_universe_symbols(explicit_symbols=symbols, use_test=use_test_symbols)
     index_symbols = _resolve_index_symbols(cfg)
-    rpm = 60
+    rpm = int(source_config().get("rate_limit", {}).get("requests_per_minute", 15))
     eod_cfg = cfg.get("jobs", {}).get("eod_reconcile", {})
     max_workers = max(int(eod_cfg.get("max_parallel_symbols", cfg.get("execution", {}).get("parallel_workers", 4))), 1)
     limiter = SlidingWindowRateLimiter(rpm)

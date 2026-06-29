@@ -27,10 +27,12 @@ def render_operations(client: Client):
         ui.button("Refresh View", on_click=lambda: render_snapshot())
 
     with ui.row().classes("w-full gap-2"):
+        ui.button("Auto Update Data", on_click=lambda: _trigger("auto_update_data"))
         ui.button("Run Intraday Delta", on_click=lambda: _trigger("run_intraday_delta"))
         ui.button("Run EOD Reconcile", on_click=lambda: _trigger("run_eod_reconcile"))
         ui.button("Run dbt Transforms", on_click=lambda: _trigger("run_dbt_transforms"))
         ui.button("Run Agent Cycle", on_click=lambda: _trigger("run_agent_cycle"))
+        ui.button("Run System Analysis", on_click=lambda: _trigger("run_agent_system_analysis"))
         ui.button("Re-ingest Logs", on_click=lambda: _trigger("ingest_observability_logs"))
         ui.button("Refresh Manifest", on_click=lambda: _trigger("refresh_manifest"))
         ui.button("Re-evaluate Alerts", on_click=lambda: _trigger("evaluate_alerts"))

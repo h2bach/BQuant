@@ -144,7 +144,9 @@ def _fetch_index(
                 actual_end=str(frame["trading_date"].max()),
             )
         return symbol, frame, source_label
-    except Exception as exc:
+    except BaseException as exc:
+        if isinstance(exc, KeyboardInterrupt):
+            raise
         logger.warning(
             f"Market index daily fetch failed for {symbol}",
             operation="fetch_market_index_daily_symbol",

@@ -22,10 +22,18 @@ LOGGER = BQuantLogger("web_operations", component="web", subcomponent="operation
 
 
 ACTION_MAP = {
+    "auto_update_data": ["-m", "pipelines.auto_update_data", "--trigger-type", "manual"],
     "run_intraday_delta": ["-m", "pipelines.run_intraday_delta", "--trigger-type", "manual"],
     "run_eod_reconcile": ["-m", "pipelines.run_eod_reconcile", "--trigger-type", "manual"],
     "run_dbt_transforms": ["-m", "pipelines.run_dbt_transforms", "--trigger-type", "manual"],
     "run_agent_cycle": ["-m", "pipelines.run_agent_cycle", "--trigger-type", "manual"],
+    "run_agent_system_analysis": [
+        "-m",
+        "pipelines.run_agent_system_analysis",
+        "--trigger-type",
+        "manual",
+        "--refresh-recommendations",
+    ],
     "ingest_observability_logs": ["-m", "pipelines.ingest_observability_logs"],
     "refresh_manifest": ["-m", "pipelines.refresh_manifest", "--trigger-type", "manual"],
     "evaluate_alerts": ["-m", "pipelines.evaluate_alerts", "--trigger-type", "manual"],
@@ -201,6 +209,7 @@ def load_operations_snapshot() -> dict[str, Any]:
         get_refresh_state("analytics_mart_symbol_data_quality"),
         get_refresh_state("analytics_mart_agent_context_daily"),
         get_refresh_state("agent_recommendations"),
+        get_refresh_state("agent_system_analysis"),
     ]
     return snapshot
 

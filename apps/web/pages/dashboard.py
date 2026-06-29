@@ -39,6 +39,7 @@ def render_dashboard(client: Client):
             ui.button("SQL Lab", on_click=lambda: ui.navigate.to("/sql_lab"))
             ui.button("Operations", on_click=lambda: ui.navigate.to("/operations"))
             ui.button("Alerts", on_click=lambda: ui.navigate.to("/alerts"))
+            ui.button("Agents", on_click=lambda: ui.navigate.to("/agents"))
         with ui.row().classes("items-center gap-3"):
             ui.label("Range").classes("text-sm text-slate-400")
             period_select = ui.select(

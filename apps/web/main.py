@@ -93,6 +93,13 @@ def alerts(client: Client):
     render_alerts(client)
 
 
+@ui.page("/agents")
+def agents(client: Client):
+    """Agentic AI page."""
+    from apps.web.pages.agents import render_agents
+    render_agents(client)
+
+
 def main():
     """Run the NiceGUI application."""
     if not Path(get_observability_db_path()).exists():

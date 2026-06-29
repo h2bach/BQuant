@@ -169,7 +169,9 @@ def _fetch_symbol(
                 actual_end=str(standardized["trading_date"].max()),
             )
         return symbol, standardized, source_label
-    except Exception as exc:
+    except BaseException as exc:
+        if isinstance(exc, KeyboardInterrupt):
+            raise
         logger.warning(
             f"Daily base fetch failed for {symbol}",
             operation="fetch_daily_symbol",

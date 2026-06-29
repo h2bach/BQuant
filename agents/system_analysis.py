@@ -1,0 +1,1009 @@
+"""System-level BQuant agents for data health, TA summaries, and portfolio review."""
+
+from __future__ import annotations
+
+import json
+import math
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import yaml
+
+from agents.orchestrator import run_agent_cycle
+from pipelines.live_update_runtime import (
+    create_run_id,
+    eod_reconcile_time,
+    is_trading_day,
+    latest_eligible_intraday_slot,
+    now_local,
+    record_pipeline_run,
+)
+from utils.logger import BQuantLogger
+from warehouse.duckdb_connection import get_connection
+from warehouse.refresh_state import bump_refresh_version, ensure_refresh_state_table, get_refresh_state
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+LLM_RUNTIME_CONFIG_PATH = REPO_ROOT / "configs" / "llm_runtime.yaml"
+PIPELINE_NAME = "run_agent_system_analysis"
+DATASET_NAME = "agent_system_analysis"
+AGENT_VERSION = "system-analysis-v1"
+
+
+def _json_default(value: Any) -> str:
+    """Serialize non-standard scalar values for JSON payloads.
+
+    Args:
+        value: Value produced by pandas, DuckDB, or Python date/time APIs.
+
+    Returns:
+        ISO/string representation safe for JSON storage.
+    """
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    return str(value)
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Convert an optional scalar to a finite float.
+
+    Args:
+        value: Raw scalar returned from pandas/DuckDB.
+        default: Fallback value for null, NaN, or non-finite inputs.
+
+    Returns:
+        Finite float suitable for scoring and display.
+    """
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    return result if math.isfinite(result) else default
+
+
+def _fmt_pct(value: Any, digits: int = 2) -> str:
+    """Format a decimal return as a percentage string.
+
+    Args:
+        value: Decimal value such as `0.0123`.
+        digits: Number of decimal places to display.
+
+    Returns:
+        Percentage string, or `N/A` for null/non-finite values.
+    """
+    if value is None or pd.isna(value):
+        return "N/A"
+    return f"{_safe_float(value) * 100:+.{digits}f}%"
+
+
+def _fmt_number(value: Any, digits: int = 2) -> str:
+    """Format a numeric scalar with thousands separators.
+
+    Args:
+        value: Raw scalar value.
+        digits: Decimal places for float-like values.
+
+    Returns:
+        Human-readable number string.
+    """
+    if value is None or pd.isna(value):
+        return "N/A"
+    return f"{_safe_float(value):,.{digits}f}"
+
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    """Load a YAML configuration file if it exists.
+
+    Args:
+        path: Absolute path to the YAML file.
+
+    Returns:
+        Parsed mapping, or an empty dictionary for missing/empty files.
+    """
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle) or {}
+
+
+def ensure_system_analysis_tables() -> None:
+    """Create system-analysis persistence objects when schema init has not run.
+
+    Side Effects:
+        Executes idempotent DDL in the primary DuckDB warehouse.
+    """
+    with get_connection(read_only=False) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agent_system_analysis_runs (
+                run_id VARCHAR PRIMARY KEY,
+                analysis_date DATE NOT NULL,
+                trigger_type VARCHAR NOT NULL,
+                status VARCHAR NOT NULL,
+                report_markdown VARCHAR NOT NULL,
+                sections_json VARCHAR NOT NULL,
+                question VARCHAR,
+                answer_markdown VARCHAR,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_system_analysis_runs_date
+            ON agent_system_analysis_runs(analysis_date)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_system_analysis_runs_status
+            ON agent_system_analysis_runs(status)
+            """
+        )
+        conn.execute(
+            """
+            CREATE OR REPLACE VIEW v_latest_agent_system_analysis AS
+            SELECT *
+            FROM agent_system_analysis_runs
+            WHERE status = 'success'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        )
+
+
+def previous_trading_date(anchor: date, *, inclusive: bool = True) -> date:
+    """Find the previous configured trading day.
+
+    Args:
+        anchor: Date to inspect.
+        inclusive: Whether `anchor` itself can be returned.
+
+    Returns:
+        Previous non-weekend trading date according to `configs/live_update.yaml`.
+    """
+    current = anchor if inclusive else anchor - timedelta(days=1)
+    while not is_trading_day(current):
+        current -= timedelta(days=1)
+    return current
+
+
+def expected_daily_date(moment: datetime | None = None) -> date:
+    """Resolve the daily bar date that BQuant should have available now.
+
+    Args:
+        moment: Optional timezone-aware market timestamp. Defaults to local
+            market time.
+
+    Returns:
+        Current date after EOD buffer on trading days; otherwise the previous
+        trading day. This intentionally handles weekend skips before the
+        platform has a full exchange-holiday calendar.
+    """
+    current = moment or now_local()
+    if is_trading_day(current.date()) and current >= eod_reconcile_time(current.date()):
+        return current.date()
+    return previous_trading_date(current.date(), inclusive=False)
+
+
+def _trading_day_gap(latest: date | None, expected: date) -> int:
+    """Count configured trading days between a latest date and expected date.
+
+    Args:
+        latest: Latest available date in a dataset.
+        expected: Expected latest date for current market time.
+
+    Returns:
+        Non-negative number of missing trading days.
+    """
+    if latest is None:
+        return 999
+    if latest >= expected:
+        return 0
+    missing = 0
+    cursor = latest + timedelta(days=1)
+    while cursor <= expected:
+        if is_trading_day(cursor):
+            missing += 1
+        cursor += timedelta(days=1)
+    return missing
+
+
+def _single_row(sql: str, params: list[Any] | None = None) -> dict[str, Any]:
+    """Run a query expected to return one row.
+
+    Args:
+        sql: DuckDB SQL statement.
+        params: Optional positional parameters.
+
+    Returns:
+        Dictionary for the first row, or an empty dictionary when no row exists.
+    """
+    with get_connection(read_only=True) as conn:
+        frame = conn.execute(sql, params or []).df()
+    if frame.empty:
+        return {}
+    return frame.iloc[0].to_dict()
+
+
+def _frame(sql: str, params: list[Any] | None = None) -> pd.DataFrame:
+    """Run a read-only query into a DataFrame.
+
+    Args:
+        sql: DuckDB SQL statement.
+        params: Optional positional parameters.
+
+    Returns:
+        Query result as a pandas DataFrame.
+    """
+    with get_connection(read_only=True) as conn:
+        return conn.execute(sql, params or []).df()
+
+
+def collect_data_health() -> dict[str, Any]:
+    """Run the data-health agent over warehouse, manifest, and refresh state.
+
+    Returns:
+        Structured data-health summary used by the report and web UI.
+    """
+    current = now_local()
+    expected_date = expected_daily_date(current)
+    eligible_slot = latest_eligible_intraday_slot(current)
+
+    daily = _single_row(
+        """
+        WITH per_symbol AS (
+            SELECT symbol,
+                   min(trading_date) AS first_date,
+                   max(trading_date) AS latest_date,
+                   count(*) AS row_count
+            FROM daily_ohlcv_base
+            GROUP BY symbol
+        )
+        SELECT min(first_date) AS first_date,
+               max(latest_date) AS latest_date,
+               min(latest_date) AS coverage_floor_date,
+               sum(row_count) AS row_count,
+               count(*) AS symbol_count
+        FROM per_symbol
+        """
+    )
+    indices = _single_row(
+        """
+        WITH per_symbol AS (
+            SELECT symbol,
+                   min(trading_date) AS first_date,
+                   max(trading_date) AS latest_date,
+                   count(*) AS row_count
+            FROM market_index_daily_base
+            GROUP BY symbol
+        )
+        SELECT min(first_date) AS first_date,
+               max(latest_date) AS latest_date,
+               min(latest_date) AS coverage_floor_date,
+               sum(row_count) AS row_count,
+               count(*) AS symbol_count
+        FROM per_symbol
+        """
+    )
+    intraday = _single_row(
+        """
+        SELECT min(bar_time) AS first_bar_time,
+               max(bar_time) AS latest_bar_time,
+               count(*) AS row_count,
+               count(DISTINCT symbol) AS symbol_count
+        FROM v_intraday_15m_plot_universe
+        """
+    )
+    manifest = _frame(
+        """
+        SELECT dataset_name, update_status, count(*) AS row_count
+        FROM data_file_manifest
+        GROUP BY dataset_name, update_status
+        ORDER BY dataset_name, update_status
+        """
+    )
+    quality = _frame(
+        """
+        SELECT data_quality_status, count(*) AS symbol_count
+        FROM analytics_marts.mart_symbol_data_quality
+        GROUP BY data_quality_status
+        ORDER BY data_quality_status
+        """
+    )
+
+    daily_latest = (
+        pd.Timestamp(daily.get("coverage_floor_date")).date() if daily.get("coverage_floor_date") is not None else None
+    )
+    index_latest = (
+        pd.Timestamp(indices.get("coverage_floor_date")).date()
+        if indices.get("coverage_floor_date") is not None
+        else None
+    )
+    latest_intraday = (
+        pd.Timestamp(intraday.get("latest_bar_time")).to_pydatetime()
+        if intraday.get("latest_bar_time") is not None
+        else None
+    )
+    daily_gap = _trading_day_gap(daily_latest, expected_date)
+    index_gap = _trading_day_gap(index_latest, expected_date)
+    intraday_due = eligible_slot is not None
+    intraday_stale = bool(intraday_due and (latest_intraday is None or latest_intraday < eligible_slot.replace(tzinfo=None)))
+    quality_failures = 0
+    if not quality.empty:
+        quality_failures = int(quality.loc[quality["data_quality_status"] != "pass", "symbol_count"].sum())
+    stale_manifest_rows = 0
+    awaiting_refresh_rows = 0
+    if not manifest.empty:
+        stale_manifest_rows = int(
+            manifest.loc[
+                manifest["update_status"].isin(["stale", "pending_merge"]),
+                "row_count",
+            ].sum()
+        )
+        awaiting_refresh_rows = int(
+            manifest.loc[manifest["update_status"].isin(["awaiting_refresh_window"]), "row_count"].sum()
+        )
+
+    status = "healthy"
+    if daily_gap > 0 or index_gap > 0 or intraday_stale:
+        status = "stale"
+    if quality_failures > 0 or stale_manifest_rows > 0:
+        status = "warning" if status == "healthy" else status
+
+    return {
+        "agent": "data_health_agent",
+        "status": status,
+        "current_time": current.isoformat(),
+        "expected_daily_date": expected_date.isoformat(),
+        "latest_eligible_intraday_slot": eligible_slot.isoformat() if eligible_slot else None,
+        "daily": {
+            **daily,
+            "coverage_floor_date": daily_latest.isoformat() if daily_latest else None,
+            "missing_trading_days": daily_gap,
+            "refresh_state": get_refresh_state("daily_ohlcv_10y"),
+        },
+        "market_indices": {
+            **indices,
+            "coverage_floor_date": index_latest.isoformat() if index_latest else None,
+            "missing_trading_days": index_gap,
+            "refresh_state": get_refresh_state("market_index_daily_10y"),
+        },
+        "intraday": {
+            **intraday,
+            "latest_bar_time": latest_intraday.isoformat() if latest_intraday else None,
+            "stale": intraday_stale,
+            "refresh_state": get_refresh_state("intraday_ohlcv_15m_delta"),
+        },
+        "manifest_status": manifest.to_dict("records"),
+        "quality_status": quality.to_dict("records"),
+        "quality_failure_count": quality_failures,
+        "stale_manifest_rows": stale_manifest_rows,
+        "awaiting_refresh_rows": awaiting_refresh_rows,
+    }
+
+
+def _market_row_to_summary(row: pd.Series) -> dict[str, Any]:
+    """Convert one market-index return row into a compact TA summary.
+
+    Args:
+        row: Row from `analytics_intermediate.int_market_index_returns`.
+
+    Returns:
+        Dictionary with trend, return, volatility, and moving-average fields.
+    """
+    close = _safe_float(row.get("close"))
+    sma20 = _safe_float(row.get("sma_20"))
+    sma50 = _safe_float(row.get("sma_50"))
+    sma200 = _safe_float(row.get("sma_200"))
+    trend_parts: list[str] = []
+    if close > sma20:
+        trend_parts.append("above SMA20")
+    else:
+        trend_parts.append("below SMA20")
+    if close > sma50:
+        trend_parts.append("above SMA50")
+    else:
+        trend_parts.append("below SMA50")
+    if close > sma200:
+        trend_parts.append("above SMA200")
+    else:
+        trend_parts.append("below SMA200")
+
+    return {
+        "symbol": str(row.get("symbol")),
+        "trading_date": str(row.get("trading_date")),
+        "close": close,
+        "return_1d": _safe_float(row.get("return_1d")),
+        "return_5d": _safe_float(row.get("return_5d")),
+        "return_20d": _safe_float(row.get("return_20d")),
+        "return_60d": _safe_float(row.get("return_60d")),
+        "volatility_20d": _safe_float(row.get("volatility_20d")),
+        "volatility_60d": _safe_float(row.get("volatility_60d")),
+        "sma_20": sma20,
+        "sma_50": sma50,
+        "sma_200": sma200,
+        "trend_summary": ", ".join(trend_parts),
+    }
+
+
+def collect_chart_ta_summary() -> dict[str, Any]:
+    """Run the chart/TA agent over market regime and index-return marts.
+
+    Returns:
+        Structured day/week/month market summary for VNIndex and VN30.
+    """
+    regime = _single_row(
+        """
+        SELECT *
+        FROM analytics_marts.mart_market_regime_daily
+        ORDER BY trading_date DESC
+        LIMIT 1
+        """
+    )
+    index_rows = _frame(
+        """
+        WITH ranked AS (
+            SELECT *,
+                   row_number() OVER (PARTITION BY symbol ORDER BY trading_date DESC) AS rn
+            FROM analytics_intermediate.int_market_index_returns
+            WHERE symbol IN ('VNINDEX', 'VN30')
+        )
+        SELECT *
+        FROM ranked
+        WHERE rn = 1
+        ORDER BY symbol
+        """
+    )
+    summaries = {
+        str(row["symbol"]): _market_row_to_summary(row)
+        for _, row in index_rows.iterrows()
+    }
+    breadth = {
+        "active_symbols": int(regime.get("active_symbols") or 0),
+        "advancers": int(regime.get("advancers") or 0),
+        "decliners": int(regime.get("decliners") or 0),
+        "advancer_ratio": _safe_float(regime.get("advancer_ratio")),
+        "breadth_score": _safe_float(regime.get("breadth_score")),
+    }
+    return {
+        "agent": "chart_ta_agent",
+        "trading_date": str(regime.get("trading_date")) if regime else None,
+        "market_regime": regime.get("market_regime") if regime else None,
+        "volatility_regime": regime.get("volatility_regime") if regime else None,
+        "regime_score": _safe_float(regime.get("regime_score")) if regime else None,
+        "breadth": breadth,
+        "indices": summaries,
+    }
+
+
+def collect_portfolio_summary(*, refresh_recommendations: bool, trigger_type: str) -> dict[str, Any]:
+    """Run/read portfolio optimizer agent outputs.
+
+    Args:
+        refresh_recommendations: Whether to run the deterministic agent cycle
+            before summarizing recommendations.
+        trigger_type: Trigger metadata propagated to an optional recommendation
+            cycle.
+
+    Returns:
+        Portfolio summary with recommendation counts and top-ranked symbols.
+    """
+    cycle_result: dict[str, Any] | None = None
+    if refresh_recommendations:
+        cycle_result = run_agent_cycle(trigger_type=trigger_type)
+
+    recommendations = _frame(
+        """
+        SELECT *
+        FROM v_latest_agent_recommendations
+        ORDER BY suggested_weight DESC, score DESC, confidence DESC, symbol
+        """
+    )
+    if recommendations.empty:
+        return {
+            "agent": "portfolio_optimizer_agent",
+            "status": "no_recommendations",
+            "cycle_result": cycle_result,
+            "recommendation_counts": [],
+            "top_weights": [],
+            "watchlist": [],
+            "risk_off": [],
+        }
+
+    counts = (
+        recommendations.groupby("recommendation", dropna=False)
+        .size()
+        .reset_index(name="count")
+        .sort_values(["recommendation"])
+        .to_dict("records")
+    )
+    top_weights = recommendations.loc[recommendations["suggested_weight"] > 0].head(10).to_dict("records")
+    watchlist = (
+        recommendations.loc[recommendations["recommendation"].isin(["candidate_long", "watch"])]
+        .sort_values(["score", "confidence"], ascending=False)
+        .head(10)
+        .to_dict("records")
+    )
+    risk_off = (
+        recommendations.loc[recommendations["recommendation"].isin(["avoid_or_reduce", "blocked_data_quality"])]
+        .sort_values(["score", "confidence"], ascending=True)
+        .head(10)
+        .to_dict("records")
+    )
+    as_of_date = str(recommendations["as_of_date"].max())
+    return {
+        "agent": "portfolio_optimizer_agent",
+        "status": "ready",
+        "as_of_date": as_of_date,
+        "cycle_result": cycle_result,
+        "recommendation_counts": counts,
+        "top_weights": top_weights,
+        "watchlist": watchlist,
+        "risk_off": risk_off,
+    }
+
+
+def load_llm_runtime_plan() -> dict[str, Any]:
+    """Load the local LLM runtime recommendation/configuration.
+
+    Returns:
+        `configs/llm_runtime.yaml` mapping plus a concise runtime status.
+    """
+    config = _load_yaml(LLM_RUNTIME_CONFIG_PATH)
+    runtime = config.get("runtime", {})
+    gpu_profile = config.get("gpu_profile", {})
+    candidates = config.get("candidate_models", {})
+    return {
+        "agent": "llm_runtime_planner",
+        "enabled": bool(runtime.get("enabled", False)),
+        "backend": runtime.get("backend", "disabled"),
+        "default_model": runtime.get("default_model"),
+        "recommended_concurrent_llms": gpu_profile.get("recommended_concurrent_llms", 1),
+        "gpu_profile": gpu_profile,
+        "candidate_models": candidates,
+        "runtime": runtime,
+    }
+
+
+def _render_report(sections: dict[str, Any]) -> str:
+    """Render structured agent sections into Markdown.
+
+    Args:
+        sections: Output from data, TA, portfolio, and runtime planner agents.
+
+    Returns:
+        Markdown report stored in DuckDB and shown in the web UI.
+    """
+    health = sections["data_health"]
+    market = sections["chart_ta"]
+    portfolio = sections["portfolio"]
+    llm = sections["llm_runtime"]
+    lines: list[str] = [
+        "# BQuant Agentic System Analysis",
+        "",
+        f"- Run date: {sections['analysis_date']}",
+        f"- Agent version: {AGENT_VERSION}",
+        "",
+        "## Data Health Agent",
+        "",
+        f"- Overall status: **{health['status']}**",
+        f"- Expected daily date: `{health['expected_daily_date']}`",
+        (
+            "- Daily VN30 base: "
+            f"coverage floor `{health['daily'].get('coverage_floor_date')}`, "
+            f"latest max `{health['daily'].get('latest_date')}`, "
+            f"{int(health['daily'].get('symbol_count') or 0)} symbols, "
+            f"{int(health['daily'].get('row_count') or 0):,} rows, "
+            f"missing {health['daily'].get('missing_trading_days')} trading days"
+        ),
+        (
+            "- Market index base: "
+            f"coverage floor `{health['market_indices'].get('coverage_floor_date')}`, "
+            f"latest max `{health['market_indices'].get('latest_date')}`, "
+            f"{int(health['market_indices'].get('symbol_count') or 0)} indices, "
+            f"{int(health['market_indices'].get('row_count') or 0):,} rows, "
+            f"missing {health['market_indices'].get('missing_trading_days')} trading days"
+        ),
+        (
+            "- Intraday 15m: "
+            f"latest `{health['intraday'].get('latest_bar_time')}`, "
+            f"stale=`{health['intraday'].get('stale')}`"
+        ),
+        f"- Data quality failures: {health['quality_failure_count']}",
+        f"- Stale/pending manifest rows: {health['stale_manifest_rows']}",
+        f"- Awaiting refresh-window manifest rows: {health['awaiting_refresh_rows']}",
+        "",
+        "## Chart / TA Agent",
+        "",
+        (
+            "- Market regime: "
+            f"**{market.get('market_regime')}**, volatility regime "
+            f"**{market.get('volatility_regime')}**, regime score "
+            f"{_fmt_number(market.get('regime_score'), 3)}"
+        ),
+        (
+            "- Breadth: "
+            f"{market['breadth']['advancers']}/{market['breadth']['active_symbols']} advancing, "
+            f"advancer ratio {_fmt_pct(market['breadth']['advancer_ratio'])}"
+        ),
+    ]
+    for symbol in ["VNINDEX", "VN30"]:
+        row = market.get("indices", {}).get(symbol)
+        if not row:
+            continue
+        lines.extend(
+            [
+                (
+                    f"- {symbol}: close {_fmt_number(row['close'])}; "
+                    f"day {_fmt_pct(row['return_1d'])}, "
+                    f"week {_fmt_pct(row['return_5d'])}, "
+                    f"month {_fmt_pct(row['return_20d'])}, "
+                    f"quarter {_fmt_pct(row['return_60d'])}; "
+                    f"{row['trend_summary']}"
+                )
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Portfolio Optimizer Agent",
+            "",
+            f"- Recommendation date: `{portfolio.get('as_of_date', 'N/A')}`",
+            f"- Status: **{portfolio.get('status')}**",
+        ]
+    )
+    counts = portfolio.get("recommendation_counts") or []
+    if counts:
+        count_text = ", ".join(f"{row['recommendation']}={row['count']}" for row in counts)
+        lines.append(f"- Recommendation mix: {count_text}")
+    watchlist = portfolio.get("watchlist") or []
+    if watchlist:
+        watch_text = ", ".join(
+            f"{row['symbol']}({row['recommendation']}, score={_fmt_number(row['score'], 3)})"
+            for row in watchlist[:5]
+        )
+        lines.append(f"- Highest ranked watchlist: {watch_text}")
+    top_weights = portfolio.get("top_weights") or []
+    if top_weights:
+        weight_text = ", ".join(
+            f"{row['symbol']}={_fmt_pct(row['suggested_weight'])}"
+            for row in top_weights[:5]
+        )
+        lines.append(f"- Suggested allocation: {weight_text}")
+    else:
+        lines.append("- Suggested allocation: no long allocation under current thresholds.")
+
+    lines.extend(
+        [
+            "",
+            "## LLM Runtime Planner",
+            "",
+            f"- Runtime enabled: `{llm.get('enabled')}`",
+            f"- Recommended concurrent resident LLMs: `{llm.get('recommended_concurrent_llms')}`",
+            f"- Default model candidate: `{llm.get('default_model')}`",
+            "- Current architecture: keep deterministic agents as tools; use one quantized 7B/8B LLM for chat/orchestration when enabled.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _answer_from_sections(question: str, sections: dict[str, Any]) -> str:
+    """Answer a chat question using the latest deterministic analysis.
+
+    Args:
+        question: User question from the web UI/CLI.
+        sections: Structured report sections.
+
+    Returns:
+        Markdown answer grounded in the latest BQuant agent output.
+    """
+    lowered = question.lower()
+    health = sections["data_health"]
+    market = sections["chart_ta"]
+    portfolio = sections["portfolio"]
+    if any(keyword in lowered for keyword in ["data", "fresh", "update", "du lieu", "stale"]):
+        return (
+            "Data status: "
+            f"{health['status']}. Daily coverage floor is {health['daily'].get('coverage_floor_date')} "
+            f"while expected is {health['expected_daily_date']}. "
+            f"Market index coverage floor is {health['market_indices'].get('coverage_floor_date')}. "
+            f"Intraday latest is {health['intraday'].get('latest_bar_time')}."
+        )
+    if any(keyword in lowered for keyword in ["portfolio", "weight", "allocation", "danh muc", "toi uu"]):
+        watchlist = portfolio.get("watchlist") or []
+        names = ", ".join(row["symbol"] for row in watchlist[:5]) if watchlist else "no active candidates"
+        return (
+            "Portfolio view: "
+            f"{portfolio.get('status')}. Current highest ranked names are {names}. "
+            "Suggested weights remain conservative because allocation is only assigned to symbols crossing the candidate_long threshold."
+        )
+    if any(keyword in lowered for keyword in ["chart", "ta", "vnindex", "vn30", "market", "trend"]):
+        return (
+            "Market view: "
+            f"{market.get('market_regime')} regime with {market.get('volatility_regime')}. "
+            f"VNINDEX day/week/month returns are "
+            f"{_fmt_pct(market.get('indices', {}).get('VNINDEX', {}).get('return_1d'))}, "
+            f"{_fmt_pct(market.get('indices', {}).get('VNINDEX', {}).get('return_5d'))}, "
+            f"{_fmt_pct(market.get('indices', {}).get('VNINDEX', {}).get('return_20d'))}. "
+            f"VN30 day/week/month returns are "
+            f"{_fmt_pct(market.get('indices', {}).get('VN30', {}).get('return_1d'))}, "
+            f"{_fmt_pct(market.get('indices', {}).get('VN30', {}).get('return_5d'))}, "
+            f"{_fmt_pct(market.get('indices', {}).get('VN30', {}).get('return_20d'))}."
+        )
+    return (
+        "Latest BQuant analysis combines data health, market TA, and portfolio recommendations. "
+        f"Data is {health['status']}; market regime is {market.get('market_regime')}; "
+        f"portfolio agent status is {portfolio.get('status')}."
+    )
+
+
+def record_system_analysis_run(
+    *,
+    run_id: str,
+    analysis_date: date,
+    trigger_type: str,
+    status: str,
+    report_markdown: str,
+    sections: dict[str, Any],
+    question: str | None = None,
+    answer_markdown: str | None = None,
+) -> None:
+    """Persist one system-analysis run.
+
+    Args:
+        run_id: Unique run identifier.
+        analysis_date: Local date represented by the report.
+        trigger_type: Manual/scheduled/recovery trigger metadata.
+        status: Final run status.
+        report_markdown: Rendered Markdown report.
+        sections: Structured JSON sections behind the report.
+        question: Optional chat question answered during the run.
+        answer_markdown: Optional deterministic answer.
+
+    Side Effects:
+        Upserts the run row in DuckDB.
+    """
+    ensure_system_analysis_tables()
+    with get_connection(read_only=False) as conn:
+        conn.execute(
+            """
+            INSERT INTO agent_system_analysis_runs (
+                run_id,
+                analysis_date,
+                trigger_type,
+                status,
+                report_markdown,
+                sections_json,
+                question,
+                answer_markdown
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (run_id) DO UPDATE SET
+                status = excluded.status,
+                report_markdown = excluded.report_markdown,
+                sections_json = excluded.sections_json,
+                question = excluded.question,
+                answer_markdown = excluded.answer_markdown
+            """,
+            [
+                run_id,
+                analysis_date,
+                trigger_type,
+                status,
+                report_markdown,
+                json.dumps(sections, ensure_ascii=True, default=_json_default, sort_keys=True),
+                question,
+                answer_markdown,
+            ],
+        )
+
+
+def load_latest_system_analysis() -> dict[str, Any] | None:
+    """Load the latest successful system-analysis report.
+
+    Returns:
+        Dictionary with report metadata and parsed sections, or `None`.
+    """
+    ensure_system_analysis_tables()
+    with get_connection(read_only=True) as conn:
+        row = conn.execute(
+            """
+            SELECT run_id, analysis_date, trigger_type, status, report_markdown, sections_json,
+                   question, answer_markdown, created_at
+            FROM v_latest_agent_system_analysis
+            """
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "run_id": row[0],
+        "analysis_date": row[1],
+        "trigger_type": row[2],
+        "status": row[3],
+        "report_markdown": row[4],
+        "sections": json.loads(row[5]),
+        "question": row[6],
+        "answer_markdown": row[7],
+        "created_at": row[8],
+    }
+
+
+def answer_latest_system_question(question: str) -> str:
+    """Answer a UI chat question using the latest stored analysis.
+
+    Args:
+        question: User-entered question.
+
+    Returns:
+        Markdown answer. If no report exists, the answer explains the required
+        action instead of running a hidden side effect.
+    """
+    latest = load_latest_system_analysis()
+    if latest is None:
+        return "No system analysis is available yet. Run System Analysis first."
+    return _answer_from_sections(question, latest["sections"])
+
+
+def run_system_analysis(
+    *,
+    trigger_type: str = "manual",
+    question: str | None = None,
+    refresh_recommendations: bool = False,
+) -> dict[str, Any]:
+    """Run all deterministic BQuant system agents and persist a report.
+
+    Args:
+        trigger_type: Manual/scheduled/recovery trigger metadata.
+        question: Optional chat question to answer from the generated report.
+        refresh_recommendations: Whether to run the recommendation agent cycle
+            before portfolio summarization.
+
+    Returns:
+        Run summary with run id, status, and rendered report.
+
+    Raises:
+        Exception: Re-raises failures after logging and pipeline-run recording.
+    """
+    ensure_refresh_state_table()
+    ensure_system_analysis_tables()
+    run_id = create_run_id()
+    start_time = datetime.now()
+    logger = BQuantLogger(
+        PIPELINE_NAME,
+        component="agent",
+        subcomponent=PIPELINE_NAME,
+        default_channel="pipeline",
+    ).with_run_context(run_id=run_id, trigger_type=trigger_type, dataset_name=DATASET_NAME)
+    steps_completed: list[str] = []
+    steps_failed: list[str] = []
+    report_markdown = ""
+    answer_markdown = None
+
+    try:
+        logger.info(
+            "Starting BQuant system analysis agents",
+            event_type="job_start",
+            status="running",
+            refresh_recommendations=refresh_recommendations,
+            has_question=bool(question),
+        )
+        data_health = collect_data_health()
+        steps_completed.append("data_health_agent")
+        chart_ta = collect_chart_ta_summary()
+        steps_completed.append("chart_ta_agent")
+        portfolio = collect_portfolio_summary(
+            refresh_recommendations=refresh_recommendations,
+            trigger_type=trigger_type,
+        )
+        steps_completed.append("portfolio_optimizer_agent")
+        llm_runtime = load_llm_runtime_plan()
+        steps_completed.append("llm_runtime_planner")
+
+        sections = {
+            "analysis_date": now_local().date().isoformat(),
+            "agent_version": AGENT_VERSION,
+            "data_health": data_health,
+            "chart_ta": chart_ta,
+            "portfolio": portfolio,
+            "llm_runtime": llm_runtime,
+        }
+        report_markdown = _render_report(sections)
+        if question:
+            answer_markdown = _answer_from_sections(question, sections)
+            steps_completed.append("answer_question")
+
+        record_system_analysis_run(
+            run_id=run_id,
+            analysis_date=now_local().date(),
+            trigger_type=trigger_type,
+            status="success",
+            report_markdown=report_markdown,
+            sections=sections,
+            question=question,
+            answer_markdown=answer_markdown,
+        )
+        steps_completed.append("record_system_analysis")
+
+        refresh_state = bump_refresh_version(
+            DATASET_NAME,
+            run_id=run_id,
+            latest_data_ts=datetime.combine(now_local().date(), time.min),
+            last_success_at=datetime.now(),
+        )
+        steps_completed.append("refresh_version")
+
+        finished_at = datetime.now()
+        record_pipeline_run(
+            run_id=run_id,
+            pipeline_name=PIPELINE_NAME,
+            start_time=start_time,
+            end_time=finished_at,
+            status="success",
+            input_rows=0,
+            output_rows=1,
+        )
+        logger.log_pipeline_run(
+            pipeline_name=PIPELINE_NAME,
+            start_time=start_time.isoformat(),
+            end_time=finished_at.isoformat(),
+            status="success",
+            steps_completed=steps_completed,
+            steps_failed=steps_failed,
+            run_id=run_id,
+            trigger_type=trigger_type,
+            dataset_name=DATASET_NAME,
+            refresh_version=refresh_state["refresh_version"],
+            data_health_status=data_health["status"],
+            portfolio_status=portfolio["status"],
+        )
+        return {
+            "run_id": run_id,
+            "status": "success",
+            "report_markdown": report_markdown,
+            "answer_markdown": answer_markdown,
+            "refresh_version": refresh_state["refresh_version"],
+        }
+    except Exception as exc:
+        steps_failed.append("run_system_analysis")
+        finished_at = datetime.now()
+        record_pipeline_run(
+            run_id=run_id,
+            pipeline_name=PIPELINE_NAME,
+            start_time=start_time,
+            end_time=finished_at,
+            status="failed",
+            input_rows=0,
+            output_rows=0,
+            error_message=str(exc),
+        )
+        logger.log_error(
+            PIPELINE_NAME,
+            type(exc).__name__,
+            str(exc),
+            context={
+                "run_id": run_id,
+                "trigger_type": trigger_type,
+                "steps_completed": steps_completed,
+                "steps_failed": steps_failed,
+            },
+            channel="pipeline",
+        )
+        logger.log_pipeline_run(
+            pipeline_name=PIPELINE_NAME,
+            start_time=start_time.isoformat(),
+            end_time=finished_at.isoformat(),
+            status="failed",
+            steps_completed=steps_completed,
+            steps_failed=steps_failed,
+            error_message=str(exc),
+            run_id=run_id,
+            trigger_type=trigger_type,
+            dataset_name=DATASET_NAME,
+        )
+        raise

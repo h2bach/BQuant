@@ -1,0 +1,42 @@
+# BQuant local LLM runtime profile.
+#
+# Current host check on 2026-06-30:
+# - GPU: NVIDIA RTX A4000
+# - VRAM: 16GB total, ~15.9GB free during inspection
+#
+# v1 keeps deterministic/tool agents as the source of truth. The LLM is an
+# optional narrator/orchestrator over structured agent outputs, not the only
+# decision engine.
+
+runtime:
+  enabled: false
+  backend: openai_compatible
+  endpoint: http://127.0.0.1:8000/v1
+  api_key_env: BQUANT_LLM_API_KEY
+  default_model: Qwen/Qwen2.5-7B-Instruct-AWQ
+  max_context_tokens: 32768
+  max_new_tokens: 1024
+  temperature: 0.2
+
+gpu_profile:
+  name: NVIDIA RTX A4000
+  total_vram_gb: 16
+  recommended_concurrent_llms: 1
+  notes: Keep one 7B/8B quantized model resident and run BQuant agents as tools.
+
+candidate_models:
+  primary:
+    model_id: Qwen/Qwen2.5-7B-Instruct-AWQ
+    role: chat_orchestrator
+    quantization: AWQ 4-bit
+    reason: Strong multilingual/structured-output fit for Vietnamese finance explanations.
+  fallback_open:
+    model_id: mistralai/Mistral-7B-Instruct-v0.3
+    role: function_calling_chat
+    quantization: external_awq_or_gptq_recommended
+    reason: Apache-2.0 model with function-calling-oriented instruction tuning.
+  gated_option:
+    model_id: meta-llama/Llama-3.1-8B-Instruct
+    role: long_context_chat
+    quantization: external_awq_or_gptq_recommended
+    reason: Strong 8B instruct model, but access/license gating must be handled.

@@ -339,6 +339,24 @@ CREATE INDEX IF NOT EXISTS idx_agent_recommendations_date ON agent_recommendatio
 CREATE INDEX IF NOT EXISTS idx_agent_recommendations_symbol ON agent_recommendations(symbol);
 
 -- ============================================
+-- Agent System Analysis Tables
+-- ============================================
+CREATE TABLE IF NOT EXISTS agent_system_analysis_runs (
+    run_id VARCHAR PRIMARY KEY,
+    analysis_date DATE NOT NULL,
+    trigger_type VARCHAR NOT NULL,
+    status VARCHAR NOT NULL,
+    report_markdown VARCHAR NOT NULL,
+    sections_json VARCHAR NOT NULL,
+    question VARCHAR,
+    answer_markdown VARCHAR,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_system_analysis_runs_date ON agent_system_analysis_runs(analysis_date);
+CREATE INDEX IF NOT EXISTS idx_agent_system_analysis_runs_status ON agent_system_analysis_runs(status);
+
+-- ============================================
 -- Backtest Runs Table
 -- ============================================
 CREATE TABLE IF NOT EXISTS backtest_runs (
@@ -434,6 +452,14 @@ FROM agent_recommendations recommendations
 INNER JOIN latest_run
   ON recommendations.run_id = latest_run.run_id
 ORDER BY recommendations.suggested_weight DESC, recommendations.score DESC, recommendations.symbol;
+
+-- View: Latest agent system analysis
+CREATE OR REPLACE VIEW v_latest_agent_system_analysis AS
+SELECT *
+FROM agent_system_analysis_runs
+WHERE status = 'success'
+ORDER BY created_at DESC
+LIMIT 1;
 
 -- View: Universe members as of a date
 CREATE OR REPLACE VIEW v_universe_members AS
