@@ -1,6 +1,6 @@
 # BQuant Current Data Architecture
 
-Snapshot date: `2026-06-24`
+Snapshot date: `2026-06-29`
 
 ## 1. Data architecture goals
 
@@ -31,6 +31,7 @@ This matches the current VN30-first scope:
 | `data/marts/` | serving / output datasets |
 | `data/metadata/` | manifest parquet and metadata outputs |
 | `logs/observability/` | structured operational event logs |
+| `transformations/dbt/` | dbt project for DuckDB transformations, tests, docs, and agent-ready marts |
 
 ### 2.2 Plot-facing base dataset paths
 
@@ -51,18 +52,22 @@ The active registry is defined in:
 
 Current plot-facing dataset contract:
 
-| Dataset | Source | Time grain | Write mode | File pattern |
-| --- | --- | --- | --- | --- |
-| `daily_ohlcv_10y` | `yfinance` | daily | `replace_per_symbol` | `{symbol}_{coverage_start}_curr.parquet` |
-| `intraday_ohlcv_15m_60d` | `yfinance` | intraday 15m | `replace_per_symbol` | `{symbol}_intra60_{snapshot_date}.parquet` |
-| `intraday_ohlcv_15m_delta` | `yfinance` | intraday 15m | `replace_per_symbol` | `{symbol}_intra_delta_{snapshot_date}.parquet` |
-| `data_file_manifest` | system | metadata | `replace` | single parquet file |
+Naming note: `VCI-data-source` is the provider label for the `vnstock` API source code `VCI`. It is not the `VCI` stock symbol. Existing table rows may store the compact lineage value `vnstock:vci`, but human-facing docs should refer to the provider as `VCI-data-source`.
+
+| Dataset | Provider | Stored source value | Time grain | Write mode | File pattern |
+| --- | --- | --- | --- | --- | --- |
+| `daily_ohlcv_10y` | `VCI-data-source` | `vnstock:vci` | daily | `replace_per_symbol` | `{symbol}_{coverage_start}_curr.parquet` |
+| `market_index_daily_10y` | `VCI-data-source` | `vnstock:vci` | daily | `replace_per_symbol` | `{symbol}_{coverage_start}_curr.parquet` |
+| `intraday_ohlcv_15m_60d` | `VCI-data-source` | `vnstock:vci` | intraday 15m | `replace_per_symbol` | `{symbol}_intra60_{snapshot_date}.parquet` |
+| `intraday_ohlcv_15m_delta` | `VCI-data-source` | `vnstock:vci` | intraday 15m | `replace_per_symbol` | `{symbol}_intra_delta_{snapshot_date}.parquet` |
+| `data_file_manifest` | system | system | metadata | `replace` | single parquet file |
 
 ## 4. Main warehouse schema
 
 Schema source:
 
 - [warehouse/schema_duckdb.sql](/storage/hhbach/bquant/warehouse/schema_duckdb.sql:1)
+- [Current Data System Diagram](/storage/hhbach/bquant/architectures/data/current_data_system_diagram.md:1)
 
 ### 4.1 Universe and metadata tables
 
@@ -119,6 +124,35 @@ Key base-table semantics:
 | `backtest_runs` | `run_id` | backtest summaries |
 
 These tables exist in the schema and are part of the intended platform model, but the current active implementation focus is still the base market-data stack.
+
+### 4.7 dbt analytics schemas
+
+The active dbt project lives at:
+
+- [transformations/dbt](/storage/hhbach/bquant/transformations/dbt/README.md:1)
+
+dbt uses `dbt-duckdb` against `warehouse/bquant.duckdb` and creates analytics schemas separate from the source `main` schema:
+
+| Schema | Materialization | Purpose |
+| --- | --- | --- |
+| `analytics_staging` | views | type-stable wrappers around source tables |
+| `analytics_intermediate` | views | reusable return, breadth, liquidity, freshness, and intraday summary features |
+| `analytics_marts` | tables | tested serving marts for web, SQL Lab, and future agents |
+
+Initial dbt marts:
+
+| Mart | Grain | Purpose |
+| --- | --- | --- |
+| `analytics_marts.mart_market_regime_daily` | `trading_date` | VNINDEX/VN30 trend, volatility, and breadth regime context |
+| `analytics_marts.mart_symbol_daily_features` | `(symbol, trading_date)` | daily return, trend, volatility, liquidity, and relative-strength features |
+| `analytics_marts.mart_symbol_data_quality` | `symbol` | latest symbol-level data quality and freshness status |
+| `analytics_marts.mart_agent_context_daily` | `(symbol, trading_date)` | single agent-ready context table combining symbol features, market regime, and quality flags |
+
+Current dbt validation status from the first implementation pass:
+
+- `15` models built successfully
+- `72` data tests passed
+- `0` warnings / `0` errors
 
 ## 5. Core analytical views
 
@@ -322,18 +356,18 @@ Current tracked datasets are present logically in the code, but the table still 
 ### 11.1 Plot-facing market data lineage
 
 ```text
-yfinance
+vnstock / VCI-data-source provider
   -> daily_ohlcv_base
   -> per-symbol daily parquet files
   -> data_file_manifest
   -> daily chart views / pages
 
-yfinance
+vnstock / VCI-data-source provider intraday history
   -> intraday_ohlcv_15m_base
   -> per-symbol intraday base parquet files
   -> data_file_manifest
 
-yfinance live delta
+vnstock / VCI-data-source provider live delta
   -> intraday_ohlcv_15m_delta
   -> per-symbol intraday delta parquet files
   -> data_file_manifest

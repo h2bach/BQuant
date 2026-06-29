@@ -1,6 +1,6 @@
 # BQuant Current System Architecture
 
-Snapshot date: `2026-06-24`
+Snapshot date: `2026-06-29`
 
 ## 1. Purpose and current scope
 
@@ -10,6 +10,7 @@ The system already includes:
 
 - a local web application for data exploration and monitoring
 - a DuckDB-based warehouse for market data and derived datasets
+- a dbt-on-DuckDB transformation layer for tested analytics and agent-ready marts
 - a separate DuckDB-based observability store
 - local CLI pipelines for base data refresh, live-update preparation, manifest refresh, and alerts
 - structured logging with JSONL fan-out and later ingestion into the observability database
@@ -44,6 +45,12 @@ Main DuckDB <------------ CLI pipelines / worker
   | materialize                  | structured JSONL logs
   v                              v
 Parquet files                 logs/observability/jsonl/*
+  |
+  v
+dbt DuckDB transforms
+  |
+  v
+analytics_staging / analytics_intermediate / analytics_marts
                                      |
                                      v
                            ingest_observability_logs
@@ -62,6 +69,7 @@ The parts that are active in the current system are:
 | `data_ingestion/` | source adapters and ingestion scripts |
 | `pipelines/` | orchestration entrypoints for refresh, live update, ingest, alerts |
 | `warehouse/` | DuckDB schema, connections, manifest, refresh-state, observability init |
+| `transformations/dbt/` | dbt project for DuckDB staging, intermediate models, data tests, and marts |
 | `configs/` | system, storage, dataset, live-update, and observability configuration |
 | `data/` | Parquet lake layout |
 | `logs/` | text logs and structured JSONL logs |
@@ -98,7 +106,9 @@ Important charting behavior:
 
 - daily and intraday chart loads are cached with `lru_cache`
 - cache keys include `refresh_version` from `dataset_refresh_state`
-- VNIndex and VN30 overview chart includes volume, RSI, MACD, and EMA overlays
+- VNIndex, VN30, and symbol charts render with TradingView Lightweight Charts
+- chart overlays include EMA/SMA, Bollinger Bands, Donchian Channels, Keltner Channels, VWAP where applicable, and Supertrend
+- lower signal panels include normalized momentum, volatility, trend-strength, and volume-flow indicators: RSI, Stochastic, Williams %R, ROC, CCI, MACD, ATR%, ADX/DI, Aroon, MFI, CMF, OBV, and Bollinger width
 - intraday symbol chart reads from `v_intraday_15m_plot_universe`, which merges base and delta rows on read
 
 ### 4.2 Main warehouse
@@ -209,7 +219,7 @@ Active ingestion code:
 
 | File | Purpose |
 | --- | --- |
-| `data_ingestion/yfinance_adapter.py` | current market-data adapter |
+| `data_ingestion/vnstock_adapter.py` | current daily market-data adapter |
 | `data_ingestion/fetch_daily_10y_base.py` | daily base data loading |
 | `data_ingestion/fetch_intraday_15m.py` | intraday 15m loading |
 | `data_ingestion/fetch_vn30_universe.py` | VN30 symbol universe |
@@ -219,7 +229,8 @@ Active ingestion code:
 
 Current source posture:
 
-- `yfinance` is the active source for the base and live-update design
+- `VCI-data-source` is the active `vnstock` provider for the daily base and market-index datasets
+- The Python API still uses `source="VCI"` because that is the provider code expected by `vnstock`; it is not the `VCI` stock symbol.
 - `vnquant` and `vnstock` code still exists in the repo, mainly as historical/raw-layer support
 
 ## 5. End-to-end flows
@@ -279,7 +290,7 @@ Browser
   -> NiceGUI page
   -> service layer
   -> main warehouse / observability DB
-  -> Plotly figures / tables
+  -> TradingView Lightweight Charts / tables
 ```
 
 The current web app is read-oriented. Manual control actions are exposed from the operations layer through a fixed action map, not arbitrary shell execution.
@@ -296,7 +307,7 @@ Snapshot from the current repo state on `2026-06-24`:
 Observed status snapshot:
 
 - main plot datasets are stale relative to current date
-- `intraday_ohlcv_15m_delta` is empty
+- `intraday_ohlcv_15m_delta` is short-lived and may be empty outside live-update windows
 - `dataset_refresh_state` exists but all tracked datasets are still at refresh version `0`
 - operations page shows:
   - `failed_jobs_24h = 1`
@@ -316,6 +327,7 @@ Observed status snapshot:
 - manifest tracking
 - refresh-version table
 - live-update worker and job entrypoints
+- dbt project with DuckDB profile, source declarations, staging/intermediate models, marts, and data tests
 - structured logging and observability projection
 - alert evaluation engine
 - resilience tests for `dry-run`, `no_data`, and worker one-shot scheduling
@@ -327,6 +339,7 @@ Observed status snapshot:
 - refresh-version bumps from real successful delta/EOD runs
 - sustained worker execution across multiple real trading slots
 - replay or simulation mode for offline live-update validation
+- wiring dbt runs into a scheduler or operations UI
 
 ## 8. Current constraints and known gaps
 

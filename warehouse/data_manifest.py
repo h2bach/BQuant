@@ -42,7 +42,29 @@ DATASET_FILE_SPECS: dict[str, DatasetFileSpec] = {
         granularity="daily",
         interval="1d",
         file_role="base",
-        source="yfinance",
+        source="vnstock:vci",
+        uses_snapshot_date=False,
+        needs_merge=False,
+        export_columns=[
+            "symbol",
+            "trading_date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "adjusted_close",
+            "volume",
+            "source",
+        ],
+    ),
+    "market_index_daily_10y": DatasetFileSpec(
+        dataset_name="market_index_daily_10y",
+        table_name="market_index_daily_base",
+        time_column="trading_date",
+        granularity="daily",
+        interval="1d",
+        file_role="base",
+        source="vnstock:vci",
         uses_snapshot_date=False,
         needs_merge=False,
         export_columns=[
@@ -64,7 +86,7 @@ DATASET_FILE_SPECS: dict[str, DatasetFileSpec] = {
         granularity="intraday",
         interval="15m",
         file_role="base",
-        source="yfinance",
+        source="vnstock:vci",
         uses_snapshot_date=True,
         needs_merge=False,
         export_columns=[
@@ -88,7 +110,7 @@ DATASET_FILE_SPECS: dict[str, DatasetFileSpec] = {
         granularity="intraday",
         interval="15m",
         file_role="delta",
-        source="yfinance",
+        source="vnstock:vci",
         uses_snapshot_date=True,
         needs_merge=True,
         export_columns=[
@@ -172,7 +194,7 @@ def _format_file_name(spec: DatasetFileSpec, symbol: str, df: pd.DataFrame, snap
 
 
 def _cleanup_existing_files(directory: Path, symbol: str, spec: DatasetFileSpec, target_name: str) -> None:
-    if spec.dataset_name == "daily_ohlcv_10y":
+    if spec.granularity == "daily":
         pattern = f"{symbol}_*.parquet"
     elif spec.dataset_name == "intraday_ohlcv_15m_60d":
         pattern = f"{symbol}_intra60_*.parquet"
@@ -185,7 +207,7 @@ def _cleanup_existing_files(directory: Path, symbol: str, spec: DatasetFileSpec,
 
 
 def _delete_symbol_files(directory: Path, symbol: str, spec: DatasetFileSpec) -> None:
-    if spec.dataset_name == "daily_ohlcv_10y":
+    if spec.granularity == "daily":
         pattern = f"{symbol}_*.parquet"
     elif spec.dataset_name == "intraday_ohlcv_15m_60d":
         pattern = f"{symbol}_intra60_*.parquet"

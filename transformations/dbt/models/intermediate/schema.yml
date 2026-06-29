@@ -1,0 +1,61 @@
+version: 2
+
+models:
+  - name: int_symbol_daily_returns
+    description: Daily return, volatility, moving-average, and drawdown features per VN30 stock.
+    columns:
+      - name: symbol
+        tests: [not_null]
+      - name: trading_date
+        tests: [not_null]
+
+  - name: int_symbol_liquidity_daily
+    description: Daily volume and traded-value proxy features per VN30 stock.
+    columns:
+      - name: symbol
+        tests: [not_null]
+      - name: trading_date
+        tests: [not_null]
+      - name: volume
+        tests:
+          - non_negative
+
+  - name: int_market_index_returns
+    description: Daily return and trend features for VNINDEX and VN30.
+    columns:
+      - name: symbol
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["VNINDEX", "VN30"]
+      - name: trading_date
+        tests: [not_null]
+
+  - name: int_market_breadth_daily
+    description: VN30 constituent breadth and aggregate volume by trading date.
+    columns:
+      - name: trading_date
+        tests: [not_null, unique]
+      - name: active_symbols
+        tests:
+          - non_negative
+
+  - name: int_intraday_daily_summary
+    description: Daily summaries derived from 15-minute intraday bars.
+    columns:
+      - name: symbol
+        tests: [not_null]
+      - name: trading_date
+        tests: [not_null]
+      - name: bar_count
+        tests:
+          - non_negative
+
+  - name: int_data_freshness_status
+    description: Table-vs-manifest freshness and row-count reconciliation.
+    columns:
+      - name: dataset_name
+        tests: [not_null]
+      - name: symbol
+        tests: [not_null]

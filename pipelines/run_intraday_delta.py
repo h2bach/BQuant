@@ -7,12 +7,14 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import yaml
 
 from data_ingestion.fetch_intraday_15m import upsert_intraday_rows
-from data_ingestion.yfinance_adapter import fetch_intraday_history, source_config
+from data_ingestion.vnstock_adapter import DEFAULT_SOURCE, DEFAULT_SOURCE_LABEL, fetch_intraday_history
 from utils.logger import BQuantLogger
 from utils.rate_limit import SlidingWindowRateLimiter
 from warehouse.data_manifest import materialize_dataset_from_table
@@ -37,6 +39,13 @@ from pipelines.live_update_runtime import (
 
 PIPELINE_NAME = "run_intraday_delta"
 DATASET_NAME = "intraday_ohlcv_15m_delta"
+DATA_SOURCES_CONFIG_PATH = Path(__file__).resolve().parent.parent / "configs" / "data_sources.yaml"
+
+
+def source_config() -> dict[str, Any]:
+    """Return the canonical vnstock source configuration for live intraday jobs."""
+    with DATA_SOURCES_CONFIG_PATH.open("r", encoding="utf-8") as handle:
+        return (yaml.safe_load(handle) or {}).get("vnstock", {})
 
 
 def parse_args() -> argparse.Namespace:
@@ -118,10 +127,12 @@ def _fetch_symbol_delta(
             fetch_start.strftime("%Y-%m-%d %H:%M:%S"),
             slot_dt.strftime("%Y-%m-%d %H:%M:%S"),
             interval="15m",
+            source=DEFAULT_SOURCE,
         )
         if not chunk.empty:
-            chunk = chunk.loc[pd.to_datetime(chunk["bar_time"]) <= slot_dt.replace(tzinfo=None)].copy()
-        duration_seconds = time.perf_counter()
+            slot_local = slot_dt if slot_dt.tzinfo is not None else slot_dt.replace(tzinfo=market_timezone())
+            slot_bound = slot_local.astimezone(market_timezone()).replace(tzinfo=None)
+            chunk = chunk.loc[pd.to_datetime(chunk["bar_time"]) <= slot_bound].copy()
         request_end = datetime.now()
         logger.emit_event(
             f"Completed intraday source request for {symbol}",
@@ -134,7 +145,8 @@ def _fetch_symbol_delta(
             dataset_name=DATASET_NAME,
             symbol=symbol,
             request_id=request_id,
-            provider="yfinance",
+            provider=DEFAULT_SOURCE_LABEL,
+            source=f"vnstock:{DEFAULT_SOURCE.lower()}",
             request_start=request_start.isoformat(),
             request_end=request_end.isoformat(),
             duration_seconds=round((request_end - request_start).total_seconds(), 3),
@@ -158,7 +170,8 @@ def _fetch_symbol_delta(
             dataset_name=DATASET_NAME,
             symbol=symbol,
             request_id=request_id,
-            provider="yfinance",
+            provider=DEFAULT_SOURCE_LABEL,
+            source=f"vnstock:{DEFAULT_SOURCE.lower()}",
             request_start=request_start.isoformat(),
             request_end=request_end.isoformat(),
             duration_seconds=round((request_end - request_start).total_seconds(), 3),
@@ -231,8 +244,7 @@ def run_intraday_delta(
         )
         return {"run_id": run_id, "status": "skipped", "slot_time": None}
 
-    source_cfg = source_config()
-    rpm = int(source_cfg.get("rate_limit", {}).get("requests_per_minute", 120))
+    rpm = int(source_config().get("rate_limit", {}).get("requests_per_minute", 15))
     max_workers = max(int(cfg.get("jobs", {}).get("intraday_delta", {}).get("max_parallel_symbols", 2)), 1)
     limiter = SlidingWindowRateLimiter(rpm)
 

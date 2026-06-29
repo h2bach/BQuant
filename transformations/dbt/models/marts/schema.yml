@@ -1,0 +1,57 @@
+version: 2
+
+models:
+  - name: mart_market_regime_daily
+    description: Daily VNINDEX/VN30 market regime features for BQuant dashboards and future agents.
+    columns:
+      - name: trading_date
+        tests: [not_null, unique]
+      - name: market_regime
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["bullish", "bearish", "neutral"]
+      - name: volatility_regime
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["high_volatility", "normal_volatility", "low_volatility"]
+
+  - name: mart_symbol_daily_features
+    description: Agent-ready daily feature table per VN30 stock and trading date.
+    columns:
+      - name: symbol_date_key
+        tests: [not_null, unique]
+      - name: symbol
+        tests: [not_null]
+      - name: trading_date
+        tests: [not_null]
+      - name: volume
+        tests:
+          - non_negative
+
+  - name: mart_symbol_data_quality
+    description: Latest per-symbol daily data quality state.
+    columns:
+      - name: symbol
+        tests: [not_null, unique]
+      - name: data_quality_status
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["pass", "missing", "invalid_ohlc", "invalid_volume", "duplicate_rows", "stale", "manifest_mismatch"]
+
+  - name: mart_agent_context_daily
+    description: Single daily context mart for BQuant recommendation and research agents.
+    columns:
+      - name: symbol_date_key
+        tests: [not_null, unique]
+      - name: symbol
+        tests: [not_null]
+      - name: trading_date
+        tests: [not_null]
+      - name: agent_candidate_state
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["candidate_long", "blocked_data_quality", "risk_off_watch", "watch"]

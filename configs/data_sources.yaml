@@ -1,31 +1,5 @@
 # Data Sources Configuration for BQuant
 
-# Primary data source for OHLCV
-yfinance:
-  enabled: true
-  name: yfinance
-  type: historical_ohlcv
-  description: Yahoo Finance OHLCV data for Vietnam tickers with .VN suffix
-  package: yfinance
-
-  parameters:
-    daily_interval: 1d
-    intraday_interval: 15m
-    auto_adjust: false
-    repair: false
-    symbol_suffix: ".VN"
-    lookback_years: 10
-    intraday_window_days: 60
-    end_of_day_update_time: "15:00"
-    intraday_update_frequency: 15m
-    delta_storage_mode: separate_file
-    end_of_day_snapshot_time: "15:00"
-
-  rate_limit:
-    requests_per_minute: 120
-    retry_attempts: 3
-    retry_delay_seconds: 3
-
 # Legacy sources kept for fallback experiments only
 vnquant:
   enabled: false
@@ -35,21 +9,40 @@ vnquant:
   package: vnquant
 
 vnstock:
-  enabled: false
+  enabled: true
   name: vnstock
   type: historical_ohlcv
-  description: Legacy intraday source adapter
+  description: Canonical daily and intraday OHLCV source for Vietnam stocks and market indices via the VCI-data-source provider
   package: vnstock
+
+  parameters:
+    # `VCI` is the provider code expected by the vnstock API.
+    # BQuant documentation refers to this provider as `VCI-data-source`
+    # to avoid confusion with the VCI stock symbol.
+    default_source: VCI
+    default_source_label: VCI-data-source
+    fallback_source: KBS
+    daily_interval: d
+    intraday_interval: 15m
+    lookback_years: 10
+    intraday_window_days: 60
+
+  rate_limit:
+    requests_per_minute: 15
+    retry_attempts: 3
+    retry_delay_seconds: 3
 
 # Index data source (VNIndex, VN30)
 index_data:
   enabled: true
-  name: vnquant
+  name: vnstock
   type: index
-  description: Index data for benchmarking
+  description: Canonical market index OHLCV data for benchmarking via the VCI-data-source provider
+  source: VCI
+  source_label: VCI-data-source
   
   indices:
-    - VNIndex
+    - VNINDEX
     - VN30
 
 # Universe data source

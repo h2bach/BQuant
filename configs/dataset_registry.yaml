@@ -4,7 +4,7 @@
 datasets:
   daily_ohlcv_10y:
     name: daily_ohlcv_10y
-    description: Canonical 10-year daily OHLCV store for VN30 symbols
+    description: Canonical 10-year daily OHLCV store for VN30 symbols via the VCI-data-source provider
     parquet_path: data/base/daily_10y
     duckdb_table: daily_ohlcv_base
     layer: base
@@ -12,13 +12,29 @@ datasets:
     partition_by: []
     layout: one_file_per_symbol
     file_pattern: "{symbol}_{coverage_start}_curr.parquet"
-    source: yfinance
+    source: vnstock:vci
+    source_label: VCI-data-source
+    overwrite: true
+    mode: replace_per_symbol
+
+  market_index_daily_10y:
+    name: market_index_daily_10y
+    description: Canonical 10-year daily OHLCV store for VNINDEX and VN30 market indices via the VCI-data-source provider
+    parquet_path: data/base/market_index_daily_10y
+    duckdb_table: market_index_daily_base
+    layer: base
+    format: parquet
+    partition_by: []
+    layout: one_file_per_symbol
+    file_pattern: "{symbol}_{coverage_start}_curr.parquet"
+    source: vnstock:vci
+    source_label: VCI-data-source
     overwrite: true
     mode: replace_per_symbol
 
   intraday_ohlcv_15m_60d:
     name: intraday_ohlcv_15m_60d
-    description: Canonical 60-day 15m intraday OHLCV snapshot for VN30 symbols
+    description: Canonical vnstock VCI-data-source-compatible 60-day 15m intraday OHLCV snapshot for VN30 symbols
     parquet_path: data/base/intraday_15m_60d
     duckdb_table: intraday_ohlcv_15m_base
     layer: base
@@ -26,14 +42,15 @@ datasets:
     partition_by: []
     layout: one_file_per_symbol
     file_pattern: "{symbol}_intra60_{snapshot_date}.parquet"
-    source: yfinance
+    source: vnstock:vci
+    source_label: VCI-data-source
     interval: 15m
     overwrite: true
     mode: replace_per_symbol
 
   intraday_ohlcv_15m_delta:
     name: intraday_ohlcv_15m_delta
-    description: Separate 15m intraday delta file for post-snapshot updates
+    description: Canonical vnstock VCI-data-source-compatible 15m intraday delta file for post-snapshot updates
     parquet_path: data/base/intraday_15m_delta
     duckdb_table: intraday_ohlcv_15m_delta
     layer: base
@@ -41,7 +58,8 @@ datasets:
     partition_by: []
     layout: one_file_per_symbol
     file_pattern: "{symbol}_intra_delta_{snapshot_date}.parquet"
-    source: yfinance
+    source: vnstock:vci
+    source_label: VCI-data-source
     interval: 15m
     overwrite: true
     mode: replace_per_symbol
@@ -73,7 +91,7 @@ datasets:
 
   raw_ohlcv_hourly:
     name: raw_ohlcv_hourly
-    description: Raw hourly OHLCV data from vnstock VCI source
+    description: Raw hourly OHLCV data from the vnstock VCI-data-source provider
     parquet_path: data/raw/ohlcv_1h/source=vnstock_vci
     duckdb_table: raw_ohlcv_hourly
     layer: raw
@@ -181,6 +199,10 @@ lineage:
     inputs: []
     outputs: [technical_features_daily, data_file_manifest]
 
+  market_index_daily_10y:
+    inputs: []
+    outputs: [data_file_manifest]
+
   intraday_ohlcv_15m_60d:
     inputs: []
     outputs: [intraday_ohlcv_15m_delta, data_file_manifest]
@@ -190,7 +212,7 @@ lineage:
     outputs: [data_file_manifest]
 
   data_file_manifest:
-    inputs: [daily_ohlcv_10y, intraday_ohlcv_15m_60d, intraday_ohlcv_15m_delta]
+    inputs: [daily_ohlcv_10y, market_index_daily_10y, intraday_ohlcv_15m_60d, intraday_ohlcv_15m_delta]
     outputs: []
 
   raw_ohlcv:

@@ -17,7 +17,16 @@ LOGGER = BQuantLogger("web_symbol_explorer", component="web", subcomponent="symb
 
 
 def render_symbol_explorer(client: Client):
-    """Render the symbol explorer page."""
+    """Render the Symbol Explorer page.
+
+    Args:
+        client: NiceGUI client object supplied by the router. It is not used
+            directly because state is stored in page widgets.
+
+    Side Effects:
+        Creates symbol/mode/range controls, renders chart/table widgets, and
+        executes Lightweight Charts JavaScript in the browser.
+    """
     del client
     symbols = get_universe_symbols()
 
@@ -47,7 +56,12 @@ def render_symbol_explorer(client: Client):
         ).props(':rows-per-page-options="[15, 20, 50]"')
 
     def sync_range_options() -> None:
-        """Swap the range presets when the user toggles between daily and intraday modes."""
+        """Swap range presets when daily/intraday mode changes.
+
+        Side Effects:
+            Mutates `range_select.options` and `range_select.value` so the UI
+            never keeps an invalid period key for the selected mode.
+        """
         options = SYMBOL_DAILY_RANGE_OPTIONS if mode_select.value == "daily" else SYMBOL_INTRADAY_RANGE_OPTIONS
         default_value = "10Y" if mode_select.value == "daily" else "20D"
         range_select.options = options
@@ -56,7 +70,13 @@ def render_symbol_explorer(client: Client):
         range_select.update()
 
     def render_symbol_workspace() -> None:
-        """Render metrics, chart, and OHLCV table for the selected symbol and range."""
+        """Render metrics, chart, and OHLCV table for the selected state.
+
+        Side Effects:
+            Clears and repopulates metric/note/chart containers, updates the
+            OHLCV table rows, emits UI notifications for invalid input, logs
+            chart build failures, and executes chart JavaScript.
+        """
         symbol = symbol_select.value
         mode = mode_select.value or "daily"
         period_key = range_select.value or ("10Y" if mode == "daily" else "20D")
@@ -70,7 +90,7 @@ def render_symbol_explorer(client: Client):
         chart_container.clear()
 
         try:
-            figure, metrics, note = build_symbol_chart(symbol, mode=mode, period_key=period_key)
+            chart, metrics, note = build_symbol_chart(symbol, mode=mode, period_key=period_key)
         except Exception as exc:
             LOGGER.log_error(
                 "render_symbol_workspace",
@@ -98,7 +118,8 @@ def render_symbol_explorer(client: Client):
 
         with chart_container:
             with ui.card().classes("w-full"):
-                ui.plotly(figure).classes("w-full")
+                ui.html(chart.html, sanitize=False).classes("w-full")
+                ui.run_javascript(chart.script, timeout=5.0)
 
         table.columns = build_table_columns(mode)
         table.rows = load_symbol_rows(symbol, mode, period_key)
@@ -114,7 +135,15 @@ def render_symbol_explorer(client: Client):
 
 
 def get_universe_symbols() -> list[str]:
-    """Get list of symbols from universe."""
+    """Get the sorted list of symbols in the active universe.
+
+    Returns:
+        List of distinct universe symbols. Returns an empty list when the
+        warehouse query fails.
+
+    Side Effects:
+        Opens a read-only DuckDB connection and logs query failures.
+    """
     symbols = []
     try:
         with get_connection(read_only=True) as conn:
@@ -126,7 +155,15 @@ def get_universe_symbols() -> list[str]:
 
 
 def build_table_columns(mode: str) -> list[dict[str, str | bool]]:
-    """Build table columns for the selected mode."""
+    """Build OHLCV table column definitions for the selected mode.
+
+    Args:
+        mode: `daily` or `intraday`. Determines whether the timestamp column
+            is `trading_date` or `bar_time`.
+
+    Returns:
+        NiceGUI table column dictionaries for timestamp, OHLC, and volume.
+    """
     timestamp_field = "trading_date" if mode == "daily" else "bar_time"
     timestamp_label = "Trading Date" if mode == "daily" else "Bar Time"
     return [
@@ -140,7 +177,15 @@ def build_table_columns(mode: str) -> list[dict[str, str | bool]]:
 
 
 def _row_limit(mode: str, period_key: str) -> int:
-    """Return a table row budget aligned with the active chart range."""
+    """Return a table row budget aligned with the active chart range.
+
+    Args:
+        mode: `daily` or `intraday` data mode.
+        period_key: Active UI range preset.
+
+    Returns:
+        Maximum number of rows to fetch for the visible OHLCV table.
+    """
     daily_limits = {
         "3M": 70,
         "6M": 140,
@@ -160,7 +205,22 @@ def _row_limit(mode: str, period_key: str) -> int:
 
 
 def load_symbol_rows(symbol: str, mode: str, period_key: str) -> list[dict[str, str]]:
-    """Load OHLCV rows for the selected symbol and mode."""
+    """Load OHLCV table rows for the selected symbol and mode.
+
+    Args:
+        symbol: VN30 constituent ticker selected in the UI.
+        mode: `daily` reads `daily_ohlcv_base`; `intraday` reads
+            `intraday_ohlcv_15m_base`.
+        period_key: Active UI range preset used only to cap table row count.
+
+    Returns:
+        List of table-row dictionaries with formatted timestamp, OHLC, and
+        volume strings.
+
+    Side Effects:
+        Opens a read-only DuckDB connection, logs query failures, and shows a
+        NiceGUI notification when table loading fails.
+    """
     query = (
         """
         SELECT trading_date AS event_time, open, high, low, close, volume

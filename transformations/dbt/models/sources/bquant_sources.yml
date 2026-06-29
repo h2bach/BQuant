@@ -1,0 +1,51 @@
+version: 2
+
+sources:
+  - name: warehouse
+    schema: main
+    description: Core BQuant DuckDB warehouse tables populated by Python ingestion and live update jobs.
+    tables:
+      - name: daily_ohlcv_base
+        description: Canonical 10-year daily OHLCV for VN30 constituent stocks from the vnstock VCI-data-source provider. The accepted source value `vnstock:vci` is the compact warehouse lineage label.
+        columns:
+          - name: symbol
+            tests: [not_null]
+          - name: trading_date
+            tests: [not_null]
+          - name: close
+            tests: [not_null]
+          - name: source
+            tests:
+              - accepted_values:
+                  arguments:
+                    values: ["vnstock:vci"]
+      - name: market_index_daily_base
+        description: Canonical 10-year daily OHLCV for VNINDEX and VN30 from the vnstock VCI-data-source provider. The accepted source value `vnstock:vci` is the compact warehouse lineage label.
+        columns:
+          - name: symbol
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ["VNINDEX", "VN30"]
+          - name: trading_date
+            tests: [not_null]
+          - name: close
+            tests: [not_null]
+          - name: source
+            tests:
+              - accepted_values:
+                  arguments:
+                    values: ["vnstock:vci"]
+      - name: intraday_ohlcv_15m_base
+        description: Canonical 15-minute base OHLCV for recent VN30 intraday analysis from the vnstock VCI-data-source provider.
+      - name: intraday_ohlcv_15m_delta
+        description: Rolling 15-minute delta OHLCV from the vnstock VCI-data-source provider used by live updates before EOD reconciliation.
+      - name: universe_members
+        description: Current and historical universe membership for BQuant symbol sets.
+      - name: data_file_manifest
+        description: Per-dataset materialization manifest maintained by Python pipelines.
+      - name: dataset_refresh_state
+        description: Cross-process refresh-version table used by web caches and jobs.
+      - name: pipeline_runs
+        description: Pipeline execution summaries written by ingestion and live update jobs.

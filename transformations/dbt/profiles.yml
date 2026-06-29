@@ -1,0 +1,8 @@
+bquant_duckdb:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: /storage/hhbach/bquant/warehouse/bquant.duckdb
+      threads: 4
+      schema: analytics

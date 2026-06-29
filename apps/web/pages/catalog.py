@@ -57,7 +57,8 @@ def get_dataset_catalog() -> list[dict[str, str | int]]:
                 # Map table names to descriptions
                 descriptions = {
                     "universe_members": "VN30 universe membership with effective dates",
-                    "daily_ohlcv_base": "10-year daily OHLCV from yfinance",
+                    "daily_ohlcv_base": "10-year daily OHLCV from vnstock:VCI",
+                    "market_index_daily_base": "10-year VNINDEX/VN30 daily OHLCV from vnstock:VCI",
                     "intraday_ohlcv_15m_base": "60-day 15-minute intraday OHLCV snapshot",
                     "intraday_ohlcv_15m_delta": "Intraday delta bars after base snapshot",
                     "clean_ohlcv_daily": "Cleaned and validated daily OHLCV",

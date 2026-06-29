@@ -2,41 +2,58 @@
 
 datasets:
   daily_ohlcv_10y:
-    description: Canonical 10-year daily OHLCV store for each VN30 symbol
+    description: Canonical 10-year daily OHLCV store for each VN30 symbol via the VCI-data-source provider
     granularity: daily
-    source: yfinance
+    source: vnstock:vci
+    source_label: VCI-data-source
     lookback_years: 10
     refresh_trigger: market_close
     refresh_time: "15:00"
     timezone: "Asia/Ho_Chi_Minh"
-    parallel_fetch_workers: 4
+    parallel_fetch_workers: 1
+    write_mode: replace_per_symbol
+    file_role: base
+    file_pattern: "{symbol}_{coverage_start}_curr.parquet"
+
+  market_index_daily_10y:
+    description: Canonical 10-year daily OHLCV store for VNINDEX and VN30 market indices via the VCI-data-source provider
+    granularity: daily
+    source: vnstock:vci
+    source_label: VCI-data-source
+    lookback_years: 10
+    refresh_trigger: market_close
+    refresh_time: "15:00"
+    timezone: "Asia/Ho_Chi_Minh"
+    parallel_fetch_workers: 1
     write_mode: replace_per_symbol
     file_role: base
     file_pattern: "{symbol}_{coverage_start}_curr.parquet"
 
   intraday_ohlcv_15m_60d:
-    description: Canonical 60-day intraday 15m snapshot for each VN30 symbol
+    description: Canonical vnstock VCI-data-source-compatible 60-day intraday 15m snapshot for each VN30 symbol
     granularity: intraday
     interval: 15m
-    source: yfinance
+    source: vnstock:vci
+    source_label: VCI-data-source
     lookback_days: 60
     refresh_trigger: on_demand_snapshot
     refresh_time: "15:00"
     timezone: "Asia/Ho_Chi_Minh"
-    parallel_fetch_workers: 2
+    parallel_fetch_workers: 1
     write_mode: replace_per_symbol
     file_role: base
     file_pattern: "{symbol}_intra60_{snapshot_date}.parquet"
 
   intraday_ohlcv_15m_delta:
-    description: Separate intraday file for bars after the base snapshot date until merged
+    description: Canonical vnstock VCI-data-source-compatible intraday delta file for bars after the base snapshot date until merged
     granularity: intraday
     interval: 15m
-    source: yfinance
+    source: vnstock:vci
+    source_label: VCI-data-source
     refresh_trigger: intraday_incremental
     refresh_frequency: "15m"
     timezone: "Asia/Ho_Chi_Minh"
-    parallel_fetch_workers: 2
+    parallel_fetch_workers: 1
     write_mode: replace_per_symbol
     file_role: delta
     merge_policy: merge_after_session_complete

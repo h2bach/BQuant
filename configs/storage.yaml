@@ -32,6 +32,12 @@ datasets:
     layout: one_file_per_symbol
     file_pattern: "{symbol}_{coverage_start}_curr.parquet"
 
+  market_index_daily_10y:
+    path: data/base/market_index_daily_10y
+    format: parquet
+    layout: one_file_per_symbol
+    file_pattern: "{symbol}_{coverage_start}_curr.parquet"
+
   intraday_ohlcv_15m_60d:
     path: data/base/intraday_15m_60d
     format: parquet

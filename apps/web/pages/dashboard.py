@@ -5,7 +5,7 @@ from __future__ import annotations
 from nicegui import ui
 from nicegui.client import Client
 
-from apps.web.services.charting import MARKET_CANDLE_OPTIONS, OVERVIEW_PERIOD_OPTIONS, build_market_overview_chart
+from apps.web.services.charting import OVERVIEW_PERIOD_OPTIONS, build_market_overview_chart
 from utils.logger import BQuantLogger
 from warehouse.duckdb_connection import get_connection
 
@@ -13,7 +13,16 @@ LOGGER = BQuantLogger("web_dashboard", component="web", subcomponent="dashboard"
 
 
 def render_dashboard(client: Client):
-    """Render the main dashboard page."""
+    """Render the main dashboard page.
+
+    Args:
+        client: NiceGUI client object supplied by the router. The dashboard
+            does not currently use it directly.
+
+    Side Effects:
+        Builds NiceGUI widgets, queries dashboard summary data, and executes
+        Lightweight Charts JavaScript in the browser.
+    """
     del client
     ui.label("BQuant Platform Dashboard").classes("text-4xl font-bold")
     ui.label("Daily market view for VNIndex and VN30 with core momentum and breadth indicators.").classes(
@@ -31,11 +40,6 @@ def render_dashboard(client: Client):
             ui.button("Operations", on_click=lambda: ui.navigate.to("/operations"))
             ui.button("Alerts", on_click=lambda: ui.navigate.to("/alerts"))
         with ui.row().classes("items-center gap-3"):
-            ui.label("Candlestick").classes("text-sm text-slate-400")
-            candle_select = ui.select(
-                options=MARKET_CANDLE_OPTIONS,
-                value="VN30",
-            ).classes("w-32")
             ui.label("Range").classes("text-sm text-slate-400")
             period_select = ui.select(
                 options=OVERVIEW_PERIOD_OPTIONS,
@@ -45,19 +49,29 @@ def render_dashboard(client: Client):
     ui.separator()
     ui.label("Market Overview").classes("text-2xl font-semibold")
 
-    metrics_container = ui.row().classes("w-full gap-4")
-    note_container = ui.column().classes("w-full")
-    chart_container = ui.column().classes("w-full")
+    overview_container = ui.column().classes("w-full gap-4")
 
     def render_market_overview() -> None:
-        """Rebuild the market overview metrics, note, and chart from current controls."""
-        metrics_container.clear()
-        note_container.clear()
-        chart_container.clear()
+        """Rebuild the market overview sections after range changes.
+
+        Side Effects:
+            Clears and repopulates `overview_container`, calls chart builders
+            for VNIndex and VN30, logs render failures, and executes chart
+            JavaScript snippets in the active browser session.
+        """
+        overview_container.clear()
         try:
-            figure, metrics, note = build_market_overview_chart(
+            vnindex_chart, vnindex_metrics, vnindex_note = build_market_overview_chart(
                 period_select.value or "10Y",
-                candle_select.value or "VN30",
+                "VNIndex",
+                show_comparison=False,
+                height=620,
+            )
+            vn30_chart, vn30_metrics, vn30_note = build_market_overview_chart(
+                period_select.value or "10Y",
+                "VN30",
+                show_comparison=False,
+                height=620,
             )
         except Exception as exc:
             LOGGER.log_error(
@@ -66,29 +80,37 @@ def render_dashboard(client: Client):
                 str(exc),
                 context={
                     "period_key": period_select.value or "10Y",
-                    "candle_source": candle_select.value or "VN30",
+                    "dashboard_mode": "split_market_overview",
                 },
                 channel="web",
             )
-            with chart_container:
+            with overview_container:
                 with ui.card().classes("w-full"):
                     ui.label(f"Unable to render market overview: {exc}").classes("text-red-400")
             return
 
-        with metrics_container:
-            for metric in metrics:
-                with ui.card().classes("min-w-[180px] flex-1"):
-                    ui.label(metric["label"]).classes("text-sm text-slate-400")
-                    ui.label(metric["value"]).classes("text-xl font-semibold")
+        sections = [
+            ("VNIndex Overview", "VNIndex Price Structure", vnindex_metrics, vnindex_chart, vnindex_note),
+            ("VN30 Overview", "VN30 Price Structure", vn30_metrics, vn30_chart, vn30_note),
+        ]
 
-        with note_container:
-            ui.label(note).classes("text-sm text-slate-400")
+        with overview_container:
+            ui.label(
+                "VNIndex and VN30 now render with TradingView Lightweight Charts. Price, volume, and signal panes use separate scales so candle structure stays readable."
+            ).classes("text-sm text-slate-400")
+            for overview_title, chart_title, metrics, chart, note in sections:
+                with ui.card().classes("w-full"):
+                    ui.label(overview_title).classes("text-xl font-semibold")
+                    with ui.row().classes("w-full flex-wrap gap-3 mb-2"):
+                        for metric in metrics:
+                            with ui.column().classes("min-w-[170px] flex-1 rounded border border-slate-700 p-3"):
+                                ui.label(metric["label"]).classes("text-xs text-slate-400")
+                                ui.label(metric["value"]).classes("text-base font-semibold")
+                    ui.label(chart_title).classes("text-lg font-semibold")
+                    ui.html(chart.html, sanitize=False).classes("w-full")
+                    ui.run_javascript(chart.script, timeout=5.0)
+                    ui.label(note).classes("text-xs text-slate-400")
 
-        with chart_container:
-            with ui.card().classes("w-full"):
-                ui.plotly(figure).classes("w-full")
-
-    candle_select.on_value_change(lambda _: render_market_overview())
     period_select.on_value_change(lambda _: render_market_overview())
     render_market_overview()
 
@@ -117,7 +139,15 @@ def render_dashboard(client: Client):
 
 
 def get_dataset_stats() -> dict[str, int]:
-    """Get dataset statistics from DuckDB."""
+    """Get dataset row counts for the dashboard snapshot.
+
+    Returns:
+        Mapping from user-facing dataset label to row count. If DuckDB is not
+        readable, returns the counts collected before the error, often empty.
+
+    Side Effects:
+        Opens a read-only DuckDB connection and logs query failures.
+    """
     stats = {}
     try:
         with get_connection(read_only=True) as conn:
@@ -130,7 +160,15 @@ def get_dataset_stats() -> dict[str, int]:
 
 
 def get_universe_info() -> dict[str, str | int]:
-    """Get universe information from DuckDB."""
+    """Get current universe metadata for the dashboard snapshot.
+
+    Returns:
+        Dictionary containing `universe_name`, `symbol_count`, and
+        `effective_date` when available.
+
+    Side Effects:
+        Opens a read-only DuckDB connection and logs query failures.
+    """
     info = {}
     try:
         with get_connection(read_only=True) as conn:
@@ -152,7 +190,15 @@ def get_universe_info() -> dict[str, str | int]:
 
 
 def get_pipeline_status() -> dict[str, str]:
-    """Get pipeline status from DuckDB."""
+    """Get latest pipeline run status for the dashboard snapshot.
+
+    Returns:
+        Dictionary containing `last_run`, `success_rate`, and latest `status`
+        when pipeline history exists.
+
+    Side Effects:
+        Opens a read-only DuckDB connection and logs query failures.
+    """
     info = {}
     try:
         with get_connection(read_only=True) as conn:

@@ -14,11 +14,12 @@ import pandas as pd
 import yaml
 
 from data_ingestion.fetch_vn30_universe import DEFAULT_CONFIG_PATH
-from data_ingestion.yfinance_adapter import fetch_intraday_history, source_config
+from data_ingestion.vnstock_adapter import DEFAULT_SOURCE, DEFAULT_SOURCE_LABEL, fetch_intraday_history
 from utils.logger import BQuantLogger
 from utils.rate_limit import SlidingWindowRateLimiter
 from warehouse.data_manifest import materialize_dataset_from_table
 from warehouse.duckdb_connection import get_connection
+from warehouse.refresh_state import bump_refresh_version
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -28,36 +29,67 @@ PIPELINE_NAME = "fetch_intraday_15m"
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
-    """Load a YAML file into a dictionary."""
+    """Load a YAML file into a dictionary.
+
+    Args:
+        path: YAML file path to read.
+
+    Returns:
+        Parsed mapping. Empty files return an empty dictionary.
+    """
     with path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
 
 
 def _source_config() -> dict[str, Any]:
-    """Return the yfinance source configuration for intraday ingestion."""
-    return source_config()
+    """Return the canonical vnstock source configuration block.
+
+    Returns:
+        `configs/data_sources.yaml` block keyed by `vnstock`.
+    """
+    return _load_yaml(DATA_SOURCES_CONFIG_PATH).get("vnstock", {})
 
 
 def _management_config(mode: str) -> dict[str, Any]:
-    """Return dataset-management settings for either base or delta intraday mode."""
+    """Return dataset-management settings for an intraday mode.
+
+    Args:
+        mode: `base` for 60-day base backfill or `delta` for rolling live
+            update files.
+
+    Returns:
+        Dataset-management config block for the selected intraday dataset.
+    """
     dataset_name = "intraday_ohlcv_15m_60d" if mode == "base" else "intraday_ohlcv_15m_delta"
     return _load_yaml(DATA_MANAGEMENT_PATH).get("datasets", {}).get(dataset_name, {})
 
 
 def _default_base_start_date() -> str:
-    """Return the default base backfill start time for the configured intraday window."""
-    lookback_days = int(_source_config().get("parameters", {}).get("intraday_window_days", 60))
+    """Return the default base backfill start timestamp.
+
+    Returns:
+        Timestamp string derived from the configured base lookback window.
+    """
+    lookback_days = int(_management_config("base").get("lookback_days", 60))
     start = datetime.now() - timedelta(days=lookback_days)
     return start.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _default_end_date() -> str:
-    """Return the current local timestamp as the default intraday end bound."""
+    """Return the current local timestamp as the default intraday end bound.
+
+    Returns:
+        Local timestamp string in `YYYY-MM-DD HH:MM:SS` form.
+    """
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse CLI arguments for intraday base or delta ingestion."""
+    """Parse CLI arguments for intraday base or delta ingestion.
+
+    Returns:
+        Namespace with mode, symbols/test flag, date bounds, and snapshot date.
+    """
     parser = argparse.ArgumentParser(description="Fetch 15m intraday base or delta datasets.")
     parser.add_argument("--mode", choices=["base", "delta"], default="base")
     parser.add_argument("--symbols", nargs="*", help="Explicit symbols to fetch.")
@@ -69,7 +101,17 @@ def parse_args() -> argparse.Namespace:
 
 
 def _resolve_symbols(args: argparse.Namespace) -> list[str]:
-    """Resolve explicit or universe-config symbols for the current run."""
+    """Resolve the symbol list for the current intraday run.
+
+    Args:
+        args: Parsed CLI namespace containing optional `symbols` and `test`.
+
+    Returns:
+        Uppercase ticker list from CLI input or the configured VN30 universe.
+
+    Raises:
+        ValueError: If the selected universe config key has no symbols.
+    """
     if args.symbols:
         return [str(symbol).upper() for symbol in args.symbols]
     payload = _load_yaml(DEFAULT_CONFIG_PATH)
@@ -81,7 +123,18 @@ def _resolve_symbols(args: argparse.Namespace) -> list[str]:
 
 
 def _get_latest_bar_time(symbol: str, table_name: str) -> datetime | None:
-    """Return the latest saved intraday bar for one symbol/table pair."""
+    """Return the latest saved intraday bar for one symbol/table pair.
+
+    Args:
+        symbol: Ticker to inspect.
+        table_name: Intraday table name to query.
+
+    Returns:
+        Latest `bar_time` as a Python datetime, or `None` when no rows exist.
+
+    Side Effects:
+        Opens a read-only DuckDB connection.
+    """
     with get_connection(read_only=True) as conn:
         value = conn.execute(
             f"SELECT max(bar_time) FROM {table_name} WHERE symbol = ?",
@@ -93,7 +146,17 @@ def _get_latest_bar_time(symbol: str, table_name: str) -> datetime | None:
 
 
 def _resolve_symbol_start(symbol: str, args: argparse.Namespace) -> str:
-    """Resolve a symbol-specific start timestamp for base or incremental delta mode."""
+    """Resolve a symbol-specific start timestamp.
+
+    Args:
+        symbol: Ticker being fetched.
+        args: Parsed CLI namespace containing mode and optional start date.
+
+    Returns:
+        Start timestamp string. Base mode defaults to the configured lookback;
+        delta mode walks from latest delta bar, then latest base bar, then a
+        one-day fallback.
+    """
     if args.start_date:
         return args.start_date
     if args.mode == "base":
@@ -120,7 +183,23 @@ def _fetch_symbol(
     limiter: SlidingWindowRateLimiter,
     logger: BQuantLogger,
 ) -> pd.DataFrame:
-    """Fetch one symbol's intraday history with rate limiting and source logging."""
+    """Fetch one symbol's intraday history with rate limiting and logging.
+
+    Args:
+        symbol: VN30 ticker to fetch.
+        start_date: Inclusive start timestamp.
+        end_date: Inclusive end timestamp.
+        interval: Provider interval, normally `15m`.
+        limiter: Shared provider rate limiter.
+        logger: Structured logger for ingestion events.
+
+    Returns:
+        Standardized intraday OHLCV DataFrame, or an empty frame on provider
+        failure/empty payload.
+
+    Side Effects:
+        May sleep for rate limiting and emits structured ingestion logs.
+    """
     try:
         waited = limiter.acquire()
         if waited > 0:
@@ -130,18 +209,31 @@ def _fetch_symbol(
                 symbol=symbol,
                 wait_seconds=round(waited, 2),
             )
-        chunk = fetch_intraday_history(symbol, start_date, end_date, interval=interval)
+        chunk = fetch_intraday_history(symbol, start_date, end_date, interval=interval, source=DEFAULT_SOURCE)
         if chunk.empty:
+            logger.warning(
+                "Intraday 15m source returned no valid OHLCV bars",
+                operation="fetch_intraday_15m",
+                symbol=symbol,
+                source=f"vnstock:{DEFAULT_SOURCE.lower()}",
+                provider_label=DEFAULT_SOURCE_LABEL,
+                start_date=start_date,
+                end_date=end_date,
+                interval=interval,
+                status="empty",
+            )
             return pd.DataFrame()
 
         logger.log_data_event(
             "ingestion",
-            f"Fetched intraday 15m data for {symbol}",
+            f"Fetched intraday 15m data for {symbol} via vnstock",
             operation="fetch_intraday_15m",
             symbol=symbol,
-            source="yfinance",
+            source=f"vnstock:{DEFAULT_SOURCE.lower()}",
+            provider_label=DEFAULT_SOURCE_LABEL,
             start_date=start_date,
             end_date=end_date,
+            interval=interval,
             row_count=len(chunk),
             actual_start=str(chunk["bar_time"].min()),
             actual_end=str(chunk["bar_time"].max()),
@@ -154,7 +246,8 @@ def _fetch_symbol(
             f"Intraday 15m fetch failed for {symbol}",
             operation="fetch_intraday_15m",
             symbol=symbol,
-            source="yfinance",
+            source=f"vnstock:{DEFAULT_SOURCE.lower()}",
+            provider_label=DEFAULT_SOURCE_LABEL,
             start_date=start_date,
             end_date=end_date,
             error_type=type(exc).__name__,
@@ -164,7 +257,18 @@ def _fetch_symbol(
 
 
 def _delete_existing_slice(conn, table_name: str, symbol: str, start_time: Any, end_time: Any) -> None:
-    """Delete the target intraday slice before re-inserting refreshed rows."""
+    """Delete an intraday slice before inserting refreshed rows.
+
+    Args:
+        conn: Open writable DuckDB connection.
+        table_name: Target intraday base or delta table.
+        symbol: Ticker whose rows should be replaced.
+        start_time: Inclusive slice start timestamp.
+        end_time: Inclusive slice end timestamp.
+
+    Side Effects:
+        Deletes matching rows from `table_name`.
+    """
     conn.execute(
         f"""
         DELETE FROM {table_name}
@@ -176,7 +280,19 @@ def _delete_existing_slice(conn, table_name: str, symbol: str, start_time: Any, 
 
 
 def upsert_intraday_rows(table_name: str, df: pd.DataFrame) -> int:
-    """Replace the affected intraday slices in the requested base or delta table."""
+    """Replace affected intraday slices in the requested table.
+
+    Args:
+        table_name: `intraday_ohlcv_15m_base` or `intraday_ohlcv_15m_delta`.
+        df: Standardized intraday OHLCV rows from `vnstock_adapter`.
+
+    Returns:
+        Number of rows inserted after slice deletion.
+
+    Side Effects:
+        Opens a writable DuckDB connection, deletes overlapping slices, and
+        inserts refreshed rows.
+    """
     if df.empty:
         return 0
 
@@ -235,7 +351,19 @@ def record_pipeline_run(
     output_rows: int,
     error_message: str | None = None,
 ) -> None:
-    """Persist one pipeline-run summary row into the shared pipeline registry."""
+    """Persist one pipeline-run summary row.
+
+    Args:
+        status: Final status such as `success` or `failed`.
+        start_time: Job start timestamp.
+        end_time: Job end timestamp.
+        input_rows: Number of fetched input rows.
+        output_rows: Number of rows written/materialized.
+        error_message: Optional failure message.
+
+    Side Effects:
+        Inserts into `pipeline_runs`.
+    """
     with get_connection(read_only=False) as conn:
         conn.execute(
             """
@@ -265,13 +393,20 @@ def record_pipeline_run(
 
 
 def main() -> None:
-    """Fetch, upsert, and materialize the configured 15-minute intraday dataset."""
+    """Fetch, upsert, and materialize the configured intraday dataset.
+
+    Side Effects:
+        Fetches 15-minute bars from the vnstock `VCI-data-source` provider,
+        writes intraday base/delta tables, materializes per-symbol parquet
+        files, bumps refresh state, and writes pipeline logs.
+    """
     args = parse_args()
     source_cfg = _source_config()
     mgmt_cfg = _management_config(args.mode)
     logger = BQuantLogger(PIPELINE_NAME)
+    run_id = str(uuid.uuid4())
 
-    interval = str(source_cfg.get("parameters", {}).get("intraday_interval", "15m"))
+    interval = str(mgmt_cfg.get("interval", source_cfg.get("parameters", {}).get("intraday_interval", "15m")))
     max_workers = max(int(mgmt_cfg.get("parallel_fetch_workers", 2)), 1)
     requests_per_minute = int(source_cfg.get("rate_limit", {}).get("requests_per_minute", 15))
     limiter = SlidingWindowRateLimiter(requests_per_minute)
@@ -300,7 +435,7 @@ def main() -> None:
             pipeline_name=PIPELINE_NAME,
             mode=args.mode,
             dataset_name=dataset_name,
-            provider="yfinance",
+            provider=DEFAULT_SOURCE_LABEL,
             interval=interval,
             symbols=symbols,
             end_date=args.end_date,
@@ -369,6 +504,12 @@ def main() -> None:
         )
         steps_completed.append("materialize_symbol_files")
 
+        latest_ts = None
+        if not combined_df.empty:
+            latest_ts = pd.to_datetime(combined_df["bar_time"].max()).to_pydatetime()
+        refresh_state = bump_refresh_version(dataset_name, run_id=run_id, latest_data_ts=latest_ts)
+        steps_completed.append("bump_refresh_state")
+
         end_time = datetime.now()
         duration_seconds = time.perf_counter() - started
         record_pipeline_run(
@@ -386,7 +527,8 @@ def main() -> None:
             operation="intraday_15m_refresh",
             mode=args.mode,
             dataset_name=dataset_name,
-            source="yfinance",
+            source=f"vnstock:{DEFAULT_SOURCE.lower()}",
+            provider_label=DEFAULT_SOURCE_LABEL,
             symbols=symbols,
             end_date=args.end_date,
             snapshot_date=str(snapshot_date),
@@ -394,6 +536,7 @@ def main() -> None:
             rows_saved=total_saved_rows,
             coverage=coverage,
             materialized_files=materialized_files,
+            refresh_state=refresh_state,
         )
         logger.log_pipeline_run(
             pipeline_name=PIPELINE_NAME,
@@ -412,6 +555,7 @@ def main() -> None:
             rows_saved=total_saved_rows,
             max_workers=max_workers,
             requests_per_minute=requests_per_minute,
+            refresh_state=refresh_state,
         )
     except Exception as exc:
         end_time = datetime.now()

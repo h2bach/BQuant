@@ -1,0 +1,104 @@
+version: 2
+
+models:
+  - name: stg_daily_ohlcv
+    description: Type-stable daily OHLCV rows for VN30 constituent stocks only.
+    tests:
+      - ohlc_bounds:
+          arguments:
+            open_col: open
+            high_col: high
+            low_col: low
+            close_col: close
+      - not_in_values:
+          arguments:
+            column_name: symbol
+            values: ["VNINDEX", "VN30"]
+    columns:
+      - name: symbol_date_key
+        tests: [not_null, unique]
+      - name: symbol
+        tests:
+          - not_null
+      - name: trading_date
+        tests:
+          - not_null
+      - name: close
+        tests:
+          - not_null
+      - name: volume
+        tests:
+          - non_negative
+
+  - name: stg_market_index_daily
+    description: Type-stable daily OHLCV rows for VNINDEX and VN30 market indices.
+    tests:
+      - ohlc_bounds:
+          arguments:
+            open_col: open
+            high_col: high
+            low_col: low
+            close_col: close
+    columns:
+      - name: symbol_date_key
+        tests: [not_null, unique]
+      - name: symbol
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["VNINDEX", "VN30"]
+      - name: trading_date
+        tests:
+          - not_null
+      - name: volume
+        tests:
+          - non_negative
+
+  - name: stg_intraday_15m
+    description: Deduplicated base-plus-delta intraday 15-minute rows. Delta rows win over base rows for the same symbol/bar_time.
+    tests:
+      - ohlc_bounds:
+          arguments:
+            open_col: open
+            high_col: high
+            low_col: low
+            close_col: close
+    columns:
+      - name: symbol_bar_key
+        tests: [not_null, unique]
+      - name: symbol
+        tests:
+          - not_null
+      - name: bar_time
+        tests:
+          - not_null
+      - name: interval
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["15m"]
+      - name: volume
+        tests:
+          - non_negative
+
+  - name: stg_universe_members
+    description: Type-stable universe membership rows.
+    columns:
+      - name: universe_symbol_key
+        tests: [not_null, unique]
+      - name: symbol
+        tests: [not_null]
+      - name: universe_name
+        tests: [not_null]
+
+  - name: stg_data_file_manifest
+    description: Type-stable dataset file manifest rows.
+    columns:
+      - name: manifest_key
+        tests: [not_null, unique]
+      - name: dataset_name
+        tests: [not_null]
+      - name: row_count
+        tests:
+          - non_negative

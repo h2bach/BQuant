@@ -127,6 +127,27 @@ CREATE INDEX IF NOT EXISTS idx_daily_ohlcv_base_symbol_date ON daily_ohlcv_base(
 CREATE INDEX IF NOT EXISTS idx_daily_ohlcv_base_date ON daily_ohlcv_base(trading_date);
 
 -- ============================================
+-- Market Index Daily OHLCV Table (10 Years)
+-- ============================================
+CREATE TABLE IF NOT EXISTS market_index_daily_base (
+    symbol VARCHAR NOT NULL,
+    trading_date DATE NOT NULL,
+    open DOUBLE NOT NULL,
+    high DOUBLE NOT NULL,
+    low DOUBLE NOT NULL,
+    close DOUBLE NOT NULL,
+    adjusted_close DOUBLE,
+    volume DOUBLE NOT NULL,
+    source VARCHAR NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (symbol, trading_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_market_index_daily_symbol_date ON market_index_daily_base(symbol, trading_date);
+CREATE INDEX IF NOT EXISTS idx_market_index_daily_date ON market_index_daily_base(trading_date);
+
+-- ============================================
 -- Base Intraday OHLCV Table (15m, 60 Days)
 -- ============================================
 CREATE TABLE IF NOT EXISTS intraday_ohlcv_15m_base (
@@ -401,6 +422,12 @@ SELECT
 FROM daily_ohlcv_base d
 INNER JOIN v_universe_members u ON d.symbol = u.symbol
 WHERE u.universe_name = 'VN30';
+
+-- View: Market index daily OHLCV
+CREATE OR REPLACE VIEW v_market_index_daily_base AS
+SELECT *
+FROM market_index_daily_base
+WHERE symbol IN ('VNINDEX', 'VN30');
 
 -- View: Base intraday 15m OHLCV with latest universe
 CREATE OR REPLACE VIEW v_intraday_15m_base_universe AS

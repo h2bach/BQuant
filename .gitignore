@@ -39,6 +39,11 @@ data/**
 # Runtime logs
 logs/
 
+# dbt generated artifacts
+transformations/dbt/target/
+transformations/dbt/logs/
+transformations/dbt/.user.yml
+
 # Local warehouse state
 warehouse/*.duckdb
 warehouse/*.duckdb.*

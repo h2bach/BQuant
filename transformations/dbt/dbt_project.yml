@@ -1,0 +1,31 @@
+name: bquant_dbt
+version: "1.0.0"
+config-version: 2
+
+profile: bquant_duckdb
+
+model-paths: ["models"]
+analysis-paths: ["analyses"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+  - "logs"
+
+models:
+  bquant_dbt:
+    +materialized: view
+    staging:
+      +schema: analytics_staging
+      +materialized: view
+    intermediate:
+      +schema: analytics_intermediate
+      +materialized: view
+    marts:
+      +schema: analytics_marts
+      +materialized: table

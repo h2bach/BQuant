@@ -11,9 +11,9 @@ from typing import Any
 
 import pandas as pd
 
+from data_ingestion.vnstock_adapter import DEFAULT_SOURCE, DEFAULT_SOURCE_LABEL, fetch_daily_history
 from data_ingestion.fetch_daily_10y_base import upsert_daily_rows
 from data_ingestion.fetch_intraday_15m import upsert_intraday_rows
-from data_ingestion.yfinance_adapter import fetch_daily_history, source_config
 from utils.logger import BQuantLogger
 from utils.rate_limit import SlidingWindowRateLimiter
 from warehouse.data_manifest import clear_dataset_materialization, materialize_dataset_from_table
@@ -82,7 +82,7 @@ def _fetch_symbol_daily_latest(
                 dataset_name="daily_ohlcv_10y",
                 wait_seconds=round(waited, 2),
             )
-        frame = fetch_daily_history(symbol, trade_date.isoformat(), trade_date.isoformat())
+        frame = fetch_daily_history(symbol, trade_date.isoformat(), trade_date.isoformat(), source=DEFAULT_SOURCE)
         request_end = datetime.now()
         logger.emit_event(
             f"Completed daily latest-bar source request for {symbol}",
@@ -95,7 +95,8 @@ def _fetch_symbol_daily_latest(
             dataset_name="daily_ohlcv_10y",
             symbol=symbol,
             request_id=request_id,
-            provider="yfinance",
+            provider=DEFAULT_SOURCE_LABEL,
+            source=f"vnstock:{DEFAULT_SOURCE.lower()}",
             request_start=request_start.isoformat(),
             request_end=request_end.isoformat(),
             duration_seconds=round((request_end - request_start).total_seconds(), 3),
@@ -117,7 +118,8 @@ def _fetch_symbol_daily_latest(
             dataset_name="daily_ohlcv_10y",
             symbol=symbol,
             request_id=request_id,
-            provider="yfinance",
+            provider=DEFAULT_SOURCE_LABEL,
+            source=f"vnstock:{DEFAULT_SOURCE.lower()}",
             request_start=request_start.isoformat(),
             request_end=request_end.isoformat(),
             duration_seconds=round((request_end - request_start).total_seconds(), 3),
@@ -227,7 +229,7 @@ def run_eod_reconcile(
         return {"run_id": run_id, "status": "skipped", "trade_date": trade_date.isoformat()}
 
     target_symbols = resolve_universe_symbols(explicit_symbols=symbols, use_test=use_test_symbols)
-    rpm = int(source_config().get("rate_limit", {}).get("requests_per_minute", 120))
+    rpm = 60
     max_workers = max(int(cfg.get("execution", {}).get("parallel_workers", 4)), 1)
     limiter = SlidingWindowRateLimiter(rpm)
 

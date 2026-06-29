@@ -10,7 +10,8 @@ system:
 project:
   initial_universe: VN30
   mvp_frequency: daily
-  initial_data_source: yfinance
+  initial_data_source: vnstock:vci
+  initial_data_source_label: VCI-data-source
   test_symbols:
     - FPT
     - HPG

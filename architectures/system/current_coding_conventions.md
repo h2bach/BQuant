@@ -15,22 +15,59 @@ Tài liệu này chốt chuẩn comment, docstring và coding convention cho BQu
 
 ## 2. Function và class docstring
 
-- Tất cả hàm public phải có docstring.
-- Hàm private nên có docstring khi:
+- Tất cả hàm public phải có docstring theo chuẩn function document, không chỉ mô tả một dòng.
+- Hàm private cũng cần function document khi:
   - logic không hiển nhiên
   - hàm là helper dùng lại nhiều nơi
   - hàm thao tác với time/window/checkpoint/cache/materialization
-- Docstring nên ngắn, đi thẳng vào:
-  - hàm làm gì
-  - input/output quan trọng
-  - giả định đặc biệt nếu có
-- Tránh docstring dạng lặp lại tên hàm.
+  - hàm nhận/trả về `DataFrame`, payload JSON, DB connection, chart spec, hoặc object có contract ngầm
+- Docstring phải mô tả đủ:
+  - hàm làm gì trong ngữ cảnh BQuant
+  - `Args`: từng input, kiểu dữ liệu kỳ vọng, ý nghĩa business, default/constraint quan trọng
+  - `Returns`: kiểu dữ liệu trả về, schema/cột chính nếu là `DataFrame` hoặc cấu trúc dict/list
+  - `Raises`: exception chủ động raise hoặc lỗi phổ biến mà caller cần biết
+  - `Side Effects`: ghi DB/file/log/cache/network call nếu có
+  - `Notes`: assumption, idempotency, timezone, source/fallback, hoặc biến trung gian quan trọng nếu không nhìn code là hiểu ngay
+- Với class/dataclass, docstring cần có `Attributes` cho từng field public.
+- Với CLI `main()` và `parse_args()`, docstring vẫn cần nêu rõ input từ command line và side effects của process.
+- Tránh docstring dạng lặp lại tên hàm hoặc comment mọi assignment hiển nhiên.
 
-Ví dụ tốt:
+Template khuyến nghị:
+
+```python
+def build_symbol_chart(symbol: str, mode: str = "daily", period_key: str = "1Y") -> tuple[ChartSpec, list[dict[str, str]], str]:
+    """Build the chart payload used by Symbol Explorer.
+
+    Args:
+        symbol: VN30 constituent ticker in BQuant canonical uppercase form.
+        mode: Dataset mode to render. Supported values are `daily` and `intraday`.
+        period_key: UI range preset used to trim the loaded data before rendering.
+
+    Returns:
+        Tuple containing the chart render spec, metric cards, and a source note.
+
+    Raises:
+        ValueError: If the requested symbol/mode has no data available.
+
+    Notes:
+        Daily mode reads `daily_ohlcv_base`; intraday mode reads the merged
+        base+delta intraday view so the UI can reflect live updates.
+    """
+```
+
+Ví dụ tối thiểu chấp nhận được cho helper đơn giản:
 
 ```python
 def load_market_overview_data(period_key: str = "1Y") -> pd.DataFrame:
-    """Load and align market-level benchmark, breadth, and volume series for the overview chart."""
+    """Load market-level benchmark, breadth, and volume rows.
+
+    Args:
+        period_key: Trailing range preset such as `1Y`, `5Y`, or `ALL`.
+
+    Returns:
+        DataFrame keyed by `trading_date` with VNINDEX/VN30 OHLCV columns,
+        constituent breadth columns, volume, and relative strength.
+    """
 ```
 
 ## 3. Comment policy
@@ -44,6 +81,7 @@ def load_market_overview_data(period_key: str = "1Y") -> pd.DataFrame:
   - cache invalidation / refresh version
   - logic business theo phiên giao dịch
 - Comment nên giải thích “vì sao”, không chỉ “điều gì”.
+- Không cần comment mọi biến cục bộ. Chỉ comment biến trung gian khi biến đó thể hiện contract quan trọng, ví dụ `chart_frame`, `price_lines`, `payload`, `watermark`, `delete_range`, `checkpoint`, hoặc schema tạm thời dùng qua nhiều bước.
 
 ## 4. Naming
 

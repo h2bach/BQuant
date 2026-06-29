@@ -32,8 +32,10 @@ def refresh_manifest(*, trigger_type: str = "manual") -> dict[str, int]:
     started_at = datetime.now()
     try:
         daily = materialize_dataset_from_table("daily_ohlcv_10y")
+        market_index = materialize_dataset_from_table("market_index_daily_10y")
         intraday_base = materialize_dataset_from_table("intraday_ohlcv_15m_60d")
         intraday_delta = materialize_dataset_from_table("intraday_ohlcv_15m_delta")
+        output_rows = len(daily) + len(market_index) + len(intraday_base) + len(intraday_delta)
         finished_at = datetime.now()
         record_pipeline_run(
             run_id=run_id,
@@ -42,22 +44,23 @@ def refresh_manifest(*, trigger_type: str = "manual") -> dict[str, int]:
             end_time=finished_at,
             status="success",
             input_rows=0,
-            output_rows=len(daily) + len(intraday_base) + len(intraday_delta),
+            output_rows=output_rows,
         )
         logger.log_pipeline_run(
             pipeline_name=PIPELINE_NAME,
             start_time=started_at.isoformat(),
             end_time=finished_at.isoformat(),
             status="success",
-            steps_completed=["daily", "intraday_base", "intraday_delta"],
+            steps_completed=["daily", "market_index", "intraday_base", "intraday_delta"],
             steps_failed=[],
             run_id=run_id,
             trigger_type=trigger_type,
-            output_rows=len(daily) + len(intraday_base) + len(intraday_delta),
+            output_rows=output_rows,
         )
         ingest_observability_logs()
         return {
             "daily": len(daily),
+            "market_index": len(market_index),
             "intraday_base": len(intraday_base),
             "intraday_delta": len(intraday_delta),
         }

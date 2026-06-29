@@ -1,0 +1,21 @@
+select
+    cast(dataset_name as varchar) as dataset_name,
+    upper(cast(symbol as varchar)) as symbol,
+    cast(file_role as varchar) as file_role,
+    cast(granularity as varchar) as granularity,
+    cast(interval as varchar) as interval,
+    cast(file_name as varchar) as file_name,
+    cast(file_path as varchar) as file_path,
+    cast(coverage_start as timestamp) as coverage_start,
+    cast(coverage_end as timestamp) as coverage_end,
+    cast(row_count as integer) as row_count,
+    cast(file_size_bytes as bigint) as file_size_bytes,
+    cast(snapshot_date as date) as snapshot_date,
+    cast(source as varchar) as source,
+    cast(latest_expected_ts as timestamp) as latest_expected_ts,
+    cast(update_status as varchar) as update_status,
+    cast(needs_merge as boolean) as needs_merge,
+    cast(notes as varchar) as notes,
+    cast(last_refresh_at as timestamp) as last_refresh_at,
+    cast(dataset_name as varchar) || '|' || upper(cast(symbol as varchar)) || '|' || cast(file_role as varchar) as manifest_key
+from {{ source('warehouse', 'data_file_manifest') }}
