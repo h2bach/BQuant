@@ -14,6 +14,11 @@ import pandas as pd
 from data_ingestion.vnstock_adapter import DEFAULT_SOURCE, DEFAULT_SOURCE_LABEL, fetch_daily_history
 from data_ingestion.fetch_daily_10y_base import upsert_daily_rows
 from data_ingestion.fetch_intraday_15m import upsert_intraday_rows
+from data_ingestion.fetch_market_index_daily_10y import (
+    DEFAULT_INDEX_SYMBOLS,
+    _fetch_index,
+    upsert_market_index_rows,
+)
 from utils.logger import BQuantLogger
 from utils.rate_limit import SlidingWindowRateLimiter
 from warehouse.data_manifest import clear_dataset_materialization, materialize_dataset_from_table
@@ -28,9 +33,9 @@ from pipelines.live_update_runtime import (
     create_run_id,
     get_latest_daily_date,
     get_latest_plot_timestamp,
+    get_latest_table_timestamp,
     is_trading_day,
     load_live_update_config,
-    market_timezone,
     now_local,
     record_pipeline_run,
     resolve_universe_symbols,
@@ -38,6 +43,7 @@ from pipelines.live_update_runtime import (
 
 
 PIPELINE_NAME = "run_eod_reconcile"
+MARKET_INDEX_DATASET_NAME = "market_index_daily_10y"
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,6 +63,22 @@ def _trade_date(args_trade_date: str | None) -> datetime.date:
     if args_trade_date:
         return datetime.fromisoformat(args_trade_date).date()
     return now_local().date()
+
+
+def _resolve_index_symbols(config: dict[str, Any]) -> list[str]:
+    """Resolve market index symbols that should be refreshed at EOD.
+
+    Args:
+        config: Live-update configuration mapping.
+
+    Returns:
+        Uppercase market index symbol list. Defaults to `VNINDEX` and `VN30`.
+    """
+    source_cfg = config.get("index_data", {})
+    symbols = source_cfg.get("indices") if isinstance(source_cfg, dict) else None
+    if not symbols:
+        symbols = DEFAULT_INDEX_SYMBOLS
+    return [str(symbol).upper() for symbol in symbols]
 
 
 def _fetch_symbol_daily_latest(
@@ -202,6 +224,7 @@ def run_eod_reconcile(
     steps_failed: list[str] = []
     total_fetched_rows = 0
     total_saved_rows = 0
+    dbt_result = None
 
     if not is_trading_day(trade_date) and trigger_type != "manual":
         record_pipeline_run(
@@ -229,8 +252,10 @@ def run_eod_reconcile(
         return {"run_id": run_id, "status": "skipped", "trade_date": trade_date.isoformat()}
 
     target_symbols = resolve_universe_symbols(explicit_symbols=symbols, use_test=use_test_symbols)
+    index_symbols = _resolve_index_symbols(cfg)
     rpm = 60
-    max_workers = max(int(cfg.get("execution", {}).get("parallel_workers", 4)), 1)
+    eod_cfg = cfg.get("jobs", {}).get("eod_reconcile", {})
+    max_workers = max(int(eod_cfg.get("max_parallel_symbols", cfg.get("execution", {}).get("parallel_workers", 4))), 1)
     limiter = SlidingWindowRateLimiter(rpm)
 
     try:
@@ -240,6 +265,7 @@ def run_eod_reconcile(
             status="running",
             trade_date=trade_date.isoformat(),
             symbols=target_symbols,
+            index_symbols=index_symbols,
             max_workers=max_workers,
         )
 
@@ -289,13 +315,39 @@ def run_eod_reconcile(
                     frames.append(frame)
         steps_completed.append("fetch_daily_latest")
 
+        index_frames: list[pd.DataFrame] = []
+        with ThreadPoolExecutor(max_workers=min(max_workers, max(len(index_symbols), 1))) as executor:
+            index_futures = {
+                executor.submit(
+                    _fetch_index,
+                    symbol,
+                    trade_date.isoformat(),
+                    trade_date.isoformat(),
+                    DEFAULT_SOURCE,
+                    limiter,
+                    job_logger,
+                ): symbol
+                for symbol in index_symbols
+            }
+            for future in as_completed(index_futures):
+                _, frame, _ = future.result()
+                total_fetched_rows += int(len(frame))
+                if not frame.empty:
+                    index_frames.append(frame)
+        steps_completed.append("fetch_market_index_latest")
+
         combined_daily = (
             pd.concat(frames, ignore_index=True).sort_values(["symbol", "trading_date"]).reset_index(drop=True)
             if frames
             else pd.DataFrame()
         )
+        combined_index = (
+            pd.concat(index_frames, ignore_index=True).sort_values(["symbol", "trading_date"]).reset_index(drop=True)
+            if index_frames
+            else pd.DataFrame()
+        )
         delta_df = _load_delta_rows(trade_date)
-        if combined_daily.empty and delta_df.empty:
+        if combined_daily.empty and combined_index.empty and delta_df.empty:
             finished_at = datetime.now()
             record_pipeline_run(
                 run_id=run_id,
@@ -305,10 +357,10 @@ def run_eod_reconcile(
                 status="no_data",
                 input_rows=0,
                 output_rows=0,
-                error_message="No daily latest bar or intraday delta rows available for EOD reconcile.",
+                error_message="No daily latest bar, market index bar, or intraday delta rows available for EOD reconcile.",
             )
             job_logger.emit_event(
-                "No new daily or intraday rows available for EOD reconcile",
+                "No new daily, market index, or intraday rows available for EOD reconcile",
                 level=logging.WARNING,
                 channel="pipeline",
                 event_type="no_data",
@@ -323,7 +375,7 @@ def run_eod_reconcile(
                 status="no_data",
                 steps_completed=["fetch_daily_latest"],
                 steps_failed=[],
-                error_message="No daily latest bar or intraday delta rows available for EOD reconcile.",
+                error_message="No daily latest bar, market index bar, or intraday delta rows available for EOD reconcile.",
                 run_id=run_id,
                 trigger_type=trigger_type,
                 input_rows=0,
@@ -346,8 +398,18 @@ def run_eod_reconcile(
         total_saved_rows += upsert_daily_rows(combined_daily)
         steps_completed.append("upsert_daily")
 
+        market_index_saved_rows = upsert_market_index_rows(combined_index)
+        total_saved_rows += market_index_saved_rows
+        steps_completed.append("upsert_market_index")
+
         daily_materialized = materialize_dataset_from_table("daily_ohlcv_10y", symbols=target_symbols)
         steps_completed.append("materialize_daily")
+
+        market_index_materialized = materialize_dataset_from_table(
+            MARKET_INDEX_DATASET_NAME,
+            symbols=index_symbols,
+        )
+        steps_completed.append("materialize_market_index")
 
         # The daily refresh and delta merge are kept as separate steps so failures
         # remain diagnosable and reruns stay idempotent at the table-slice level.
@@ -378,6 +440,14 @@ def run_eod_reconcile(
             "daily_ohlcv_10y",
             run_id=run_id,
             latest_data_ts=datetime.combine(daily_latest, dtime.min) if daily_latest else None,
+            last_success_at=datetime.now(),
+        )
+        market_index_latest = get_latest_table_timestamp("market_index_daily_base", "trading_date")
+        intraday_base_refresh = None
+        market_index_refresh = bump_refresh_version(
+            MARKET_INDEX_DATASET_NAME,
+            run_id=run_id,
+            latest_data_ts=market_index_latest,
             last_success_at=datetime.now(),
         )
         base_latest = get_latest_plot_timestamp()
@@ -423,6 +493,16 @@ def run_eod_reconcile(
             )
         steps_completed.append("emit_checkpoints")
 
+        dbt_cfg = cfg.get("post_update", {}).get("dbt", {})
+        if dbt_cfg.get("enabled", True) and dbt_cfg.get("run_on_eod_reconcile", True):
+            from pipelines.run_dbt_transforms import run_dbt_transforms
+
+            dbt_result = run_dbt_transforms(
+                trigger_type=trigger_type,
+                run_tests=bool(dbt_cfg.get("test_on_eod_reconcile", True)),
+            )
+            steps_completed.append("run_dbt_transforms")
+
         finished_at = datetime.now()
         record_pipeline_run(
             run_id=run_id,
@@ -443,6 +523,7 @@ def run_eod_reconcile(
             status="success",
             refresh_versions={
                 "daily_ohlcv_10y": daily_refresh["refresh_version"],
+                MARKET_INDEX_DATASET_NAME: market_index_refresh["refresh_version"],
                 "intraday_ohlcv_15m_60d": intraday_base_refresh["refresh_version"],
                 "intraday_ohlcv_15m_delta": intraday_delta_refresh["refresh_version"],
             },
@@ -456,10 +537,12 @@ def run_eod_reconcile(
             trade_date=trade_date.isoformat(),
             rows_fetched=total_fetched_rows + int(len(delta_df)),
             rows_saved=total_saved_rows,
+            market_index_saved_rows=market_index_saved_rows,
             merged_intraday_rows=merged_intraday_rows,
             cleared_delta_rows=cleared_rows,
             trimmed_base_rows=trimmed_rows,
             daily_materialized=daily_materialized,
+            market_index_materialized=market_index_materialized,
             base_materialized=base_materialized,
             delta_materialized=delta_materialized,
         )
@@ -476,6 +559,7 @@ def run_eod_reconcile(
             output_rows=total_saved_rows,
             duration_seconds=round(time.perf_counter() - perf_started, 3),
             trade_date=trade_date.isoformat(),
+            dbt_result=dbt_result,
         )
 
         if run_post_hooks:
@@ -489,6 +573,7 @@ def run_eod_reconcile(
             "trade_date": trade_date.isoformat(),
             "rows_fetched": total_fetched_rows + int(len(delta_df)),
             "rows_saved": total_saved_rows,
+            "dbt_result": dbt_result,
         }
     except Exception as exc:
         finished_at = datetime.now()

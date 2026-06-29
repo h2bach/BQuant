@@ -61,6 +61,8 @@ def main() -> None:
     ingest_interval = int(worker_cfg.get("ingest_logs_every_seconds", 60))
     alert_interval = int(worker_cfg.get("evaluate_alerts_every_seconds", 60))
     failure_escalation = int(worker_cfg.get("consecutive_failure_escalation", 2))
+    slot_retry_interval = int(worker_cfg.get("slot_retry_interval_seconds", 300))
+    eod_retry_interval = int(worker_cfg.get("eod_retry_interval_seconds", 1800))
 
     logger = BQuantLogger(
         PIPELINE_NAME,
@@ -75,6 +77,8 @@ def main() -> None:
     last_alert_eval_at = 0.0
     last_iteration_status = "success"
     last_error_message: str | None = None
+    slot_attempted_at: dict[str, float] = {}
+    eod_attempted_at: dict[str, float] = {}
 
     logger.log_scheduler_event(
         "Starting live update worker",
@@ -125,6 +129,21 @@ def main() -> None:
                             )
                             continue
                         trigger_type = "recovery" if latest_due_slot is not None and slot_dt != latest_due_slot else "scheduled"
+                        slot_key = slot_dt.isoformat()
+                        now_ts = time.time()
+                        seconds_since_attempt = now_ts - slot_attempted_at.get(slot_key, 0.0)
+                        if seconds_since_attempt < slot_retry_interval:
+                            logger.log_scheduler_event(
+                                "Skipping recently-attempted intraday slot",
+                                event_type="slot_retry_suppressed",
+                                status="skipped",
+                                run_id=run_id,
+                                trigger_type=trigger_type,
+                                worker_name=worker_name,
+                                slot_time=slot_key,
+                                retry_after_seconds=round(slot_retry_interval - seconds_since_attempt, 1),
+                            )
+                            continue
                         logger.log_scheduler_event(
                             "Dispatching intraday delta job",
                             event_type="due_slot_detected",
@@ -136,6 +155,7 @@ def main() -> None:
                         )
                         if not args.dry_run:
                             run_intraday_delta(slot_dt=slot_dt, trigger_type=trigger_type, run_post_hooks=True)
+                            slot_attempted_at[slot_key] = now_ts
                         else:
                             logger.log_scheduler_event(
                                 "Dry-run mode: skipped intraday delta dispatch",
@@ -146,6 +166,7 @@ def main() -> None:
                                 worker_name=worker_name,
                                 slot_time=slot_dt.isoformat(),
                             )
+                            slot_attempted_at[slot_key] = now_ts
                         floor_ts = get_plot_floor_timestamp()
 
                     # After the EOD buffer time, reconcile if the daily row is stale or
@@ -153,27 +174,47 @@ def main() -> None:
                     if current >= eod_reconcile_time(current.date()):
                         latest_daily = get_latest_daily_date()
                         if latest_daily is None or latest_daily < current.date() or _delta_rows_pending(current.date()):
-                            logger.log_scheduler_event(
-                                "Dispatching EOD reconcile job",
-                                event_type="eod_dispatch",
-                                status="running",
-                                run_id=run_id,
-                                trigger_type="scheduled",
-                                worker_name=worker_name,
-                                trade_date=current.date().isoformat(),
-                            )
-                            if not args.dry_run:
-                                run_eod_reconcile(trade_date=current.date(), trigger_type="scheduled", run_post_hooks=True)
+                            eod_key = current.date().isoformat()
+                            now_ts = time.time()
+                            seconds_since_attempt = now_ts - eod_attempted_at.get(eod_key, 0.0)
+                            if seconds_since_attempt < eod_retry_interval:
+                                logger.log_scheduler_event(
+                                    "Skipping recently-attempted EOD reconcile",
+                                    event_type="eod_retry_suppressed",
+                                    status="skipped",
+                                    run_id=run_id,
+                                    trigger_type="scheduled",
+                                    worker_name=worker_name,
+                                    trade_date=eod_key,
+                                    retry_after_seconds=round(eod_retry_interval - seconds_since_attempt, 1),
+                                )
                             else:
                                 logger.log_scheduler_event(
-                                    "Dry-run mode: skipped EOD reconcile dispatch",
-                                    event_type="dry_run_skip_dispatch",
-                                    status="skipped",
+                                    "Dispatching EOD reconcile job",
+                                    event_type="eod_dispatch",
+                                    status="running",
                                     run_id=run_id,
                                     trigger_type="scheduled",
                                     worker_name=worker_name,
                                     trade_date=current.date().isoformat(),
                                 )
+                                eod_attempted_at[eod_key] = now_ts
+                                if not args.dry_run:
+                                    run_eod_reconcile(
+                                        trade_date=current.date(),
+                                        trigger_type="scheduled",
+                                        run_post_hooks=True,
+                                    )
+                                else:
+                                    logger.log_scheduler_event(
+                                        "Dry-run mode: skipped EOD reconcile dispatch",
+                                        event_type="dry_run_skip_dispatch",
+                                        status="skipped",
+                                        run_id=run_id,
+                                        trigger_type="scheduled",
+                                        worker_name=worker_name,
+                                        trade_date=current.date().isoformat(),
+                                    )
                 else:
                     logger.log_scheduler_event(
                         "Market is closed; worker is idle",

@@ -24,6 +24,7 @@ LOGGER = BQuantLogger("web_operations", component="web", subcomponent="operation
 ACTION_MAP = {
     "run_intraday_delta": ["-m", "pipelines.run_intraday_delta", "--trigger-type", "manual"],
     "run_eod_reconcile": ["-m", "pipelines.run_eod_reconcile", "--trigger-type", "manual"],
+    "run_dbt_transforms": ["-m", "pipelines.run_dbt_transforms", "--trigger-type", "manual"],
     "ingest_observability_logs": ["-m", "pipelines.ingest_observability_logs"],
     "refresh_manifest": ["-m", "pipelines.refresh_manifest", "--trigger-type", "manual"],
     "evaluate_alerts": ["-m", "pipelines.evaluate_alerts", "--trigger-type", "manual"],
@@ -191,8 +192,13 @@ def load_operations_snapshot() -> dict[str, Any]:
     snapshot["stale_symbol_count"] = int(stale_count)
     snapshot["refresh_states"] = [
         get_refresh_state("daily_ohlcv_10y"),
+        get_refresh_state("market_index_daily_10y"),
         get_refresh_state("intraday_ohlcv_15m_60d"),
         get_refresh_state("intraday_ohlcv_15m_delta"),
+        get_refresh_state("analytics_mart_market_regime_daily"),
+        get_refresh_state("analytics_mart_symbol_daily_features"),
+        get_refresh_state("analytics_mart_symbol_data_quality"),
+        get_refresh_state("analytics_mart_agent_context_daily"),
     ]
     return snapshot
 

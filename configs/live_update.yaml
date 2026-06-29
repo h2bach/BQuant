@@ -31,6 +31,8 @@ worker:
   name: bquant_live_worker
   poll_interval_seconds: 60
   catch_up_slots: 2
+  slot_retry_interval_seconds: 300
+  eod_retry_interval_seconds: 1800
   heartbeat_grace_seconds: 120
   ingest_logs_every_seconds: 60
   evaluate_alerts_every_seconds: 60
@@ -44,6 +46,19 @@ jobs:
     source_empty_alert_threshold: 2
   eod_reconcile:
     daily_dataset_name: daily_ohlcv_10y
+    market_index_dataset_name: market_index_daily_10y
     intraday_base_dataset_name: intraday_ohlcv_15m_60d
     intraday_delta_dataset_name: intraday_ohlcv_15m_delta
     refresh_latest_day_only: true
+    max_parallel_symbols: 4
+
+post_update:
+  dbt:
+    enabled: true
+    project_dir: transformations/dbt
+    profiles_dir: transformations/dbt
+    run_on_intraday_delta: true
+    run_on_eod_reconcile: true
+    test_on_intraday_delta: false
+    test_on_eod_reconcile: true
+    command: dbt

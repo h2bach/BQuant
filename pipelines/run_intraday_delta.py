@@ -416,6 +416,17 @@ def run_intraday_delta(
             )
         steps_completed.append("refresh_version")
 
+        dbt_result = None
+        dbt_cfg = cfg.get("post_update", {}).get("dbt", {})
+        if dbt_cfg.get("enabled", True) and dbt_cfg.get("run_on_intraday_delta", True):
+            from pipelines.run_dbt_transforms import run_dbt_transforms
+
+            dbt_result = run_dbt_transforms(
+                trigger_type=trigger_type,
+                run_tests=bool(dbt_cfg.get("test_on_intraday_delta", False)),
+            )
+            steps_completed.append("run_dbt_transforms")
+
         finished_at = datetime.now()
         record_pipeline_run(
             run_id=run_id,
@@ -453,6 +464,7 @@ def run_intraday_delta(
             output_rows=total_saved_rows,
             duration_seconds=round(time.perf_counter() - perf_started, 3),
             slot_time=slot_dt.isoformat(),
+            dbt_result=dbt_result,
         )
 
         if run_post_hooks:
@@ -466,6 +478,7 @@ def run_intraday_delta(
             "slot_time": slot_dt.isoformat(),
             "rows_fetched": total_fetched_rows,
             "rows_saved": total_saved_rows,
+            "dbt_result": dbt_result,
         }
     except Exception as exc:
         finished_at = datetime.now()
