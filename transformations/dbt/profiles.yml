@@ -6,3 +6,6 @@ bquant_duckdb:
       path: /storage/hhbach/bquant/warehouse/bquant.duckdb
       threads: 4
       schema: analytics
+      config_options:
+        threads: 4
+        memory_limit: 4GB

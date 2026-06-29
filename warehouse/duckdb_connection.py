@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any
 
@@ -24,23 +25,96 @@ def get_duckdb_path() -> str:
     return str((REPO_ROOT / path).resolve())
 
 
+def _duckdb_config_options(duckdb_cfg: dict[str, Any]) -> dict[str, str]:
+    """Build connection-time DuckDB configuration options.
+
+    Args:
+        duckdb_cfg: `duckdb` block from `configs/storage.yaml`.
+
+    Returns:
+        Mapping passed directly to `duckdb.connect(config=...)`. Applying these
+        values at connect time keeps app, worker, and dbt connections compatible
+        when they touch the same embedded database file.
+    """
+    options: dict[str, str] = {}
+    if duckdb_cfg.get("threads"):
+        options["threads"] = str(int(duckdb_cfg["threads"]))
+    if duckdb_cfg.get("memory_limit"):
+        options["memory_limit"] = str(duckdb_cfg["memory_limit"])
+    return options
+
+
+def _is_retryable_duckdb_error(exc: Exception) -> bool:
+    """Return whether a DuckDB connection error is likely transient.
+
+    Args:
+        exc: Exception raised while opening the embedded DuckDB database.
+
+    Returns:
+        True for lock/configuration races between short-lived app, worker, and
+        dbt connections; false for unrelated failures.
+    """
+    message = str(exc).lower()
+    retryable_markers = [
+        "conflicting lock",
+        "different configuration",
+        "can't open a connection",
+        "could not set lock",
+        "database file is locked",
+    ]
+    return any(marker in message for marker in retryable_markers)
+
+
+def _connect_with_retry(
+    db_path: Path,
+    *,
+    read_only: bool,
+    config_options: dict[str, str],
+    attempts: int = 6,
+    sleep_seconds: float = 0.5,
+) -> duckdb.DuckDBPyConnection:
+    """Open a DuckDB connection with short backoff for transient locks.
+
+    Args:
+        db_path: Absolute DuckDB file path.
+        read_only: Whether to open the connection in read-only mode.
+        config_options: Connection-time DuckDB options.
+        attempts: Maximum connection attempts.
+        sleep_seconds: Initial sleep between retries.
+
+    Returns:
+        Open DuckDB connection.
+
+    Raises:
+        Exception: Re-raises the final DuckDB error if all retries fail.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return duckdb.connect(
+                str(db_path),
+                read_only=read_only,
+                config=config_options or None,
+            )
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= attempts or not _is_retryable_duckdb_error(exc):
+                raise
+            time.sleep(sleep_seconds * attempt)
+    raise RuntimeError(f"Unable to connect to DuckDB at {db_path}") from last_exc
+
+
 def get_connection(read_only: bool = False) -> duckdb.DuckDBPyConnection:
     config = _load_storage_config()
     duckdb_cfg = config.get("duckdb", {})
     db_path = Path(get_duckdb_path())
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    conn = duckdb.connect(str(db_path), read_only=read_only)
-
-    threads = duckdb_cfg.get("threads")
-    if threads:
-        conn.execute(f"SET threads = {int(threads)};")
-
-    memory_limit = duckdb_cfg.get("memory_limit")
-    if memory_limit:
-        conn.execute("SET memory_limit = ?;", [str(memory_limit)])
-
-    return conn
+    return _connect_with_retry(
+        db_path,
+        read_only=read_only,
+        config_options=_duckdb_config_options(duckdb_cfg),
+    )
 
 
 def execute_sql_file(sql_path: str) -> None:
