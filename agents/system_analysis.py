@@ -875,6 +875,7 @@ def _compact_sections_for_llm(sections: dict[str, Any]) -> dict[str, Any]:
             "watchlist": _compact_rows(portfolio.get("watchlist"), limit=6),
             "risk_off": _compact_rows(portfolio.get("risk_off"), limit=6),
         },
+        "symbol_signals": _compact_symbol_signals(portfolio, limit=10),
         "llm_runtime": {
             "enabled": sections.get("llm_runtime", {}).get("enabled"),
             "backend": sections.get("llm_runtime", {}).get("backend"),
@@ -882,6 +883,267 @@ def _compact_sections_for_llm(sections: dict[str, Any]) -> dict[str, Any]:
             "availability": sections.get("llm_runtime", {}).get("availability"),
         },
     }
+
+
+def _safe_json_loads(value: Any) -> dict[str, Any]:
+    """Parse a JSON object value with a dictionary fallback.
+
+    Args:
+        value: Raw JSON string from DuckDB, or an already-decoded object.
+
+    Returns:
+        Parsed dictionary. Invalid or non-object payloads return `{}`.
+    """
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _round_optional(value: Any, digits: int = 6) -> float | None:
+    """Return a rounded finite float or `None`.
+
+    Args:
+        value: Nullable numeric value.
+        digits: Number of decimal places to keep.
+
+    Returns:
+        Rounded float, or `None` for null/non-finite inputs.
+    """
+    if value is None or pd.isna(value):
+        return None
+    number = _safe_float(value)
+    return round(number, digits) if math.isfinite(number) else None
+
+
+def _portfolio_signal_symbols(portfolio: dict[str, Any], limit: int) -> list[str]:
+    """Select symbols that should receive detailed LLM signal context.
+
+    Args:
+        portfolio: Portfolio section from `collect_portfolio_summary`.
+        limit: Maximum symbol count.
+
+    Returns:
+        Ordered unique symbols from top weights, watchlist, and risk-off rows.
+    """
+    symbols: list[str] = []
+    for bucket in ["top_weights", "watchlist", "risk_off"]:
+        for row in portfolio.get(bucket) or []:
+            symbol = str(row.get("symbol") or "").upper().strip()
+            if symbol and symbol not in symbols:
+                symbols.append(symbol)
+            if len(symbols) >= limit:
+                return symbols
+    return symbols[:limit]
+
+
+def _latest_recommendation_rows_for_signals(
+    *,
+    symbols: list[str],
+    as_of_date: date | None,
+    limit: int,
+) -> pd.DataFrame:
+    """Load latest recommendation rows for compact symbol context.
+
+    Args:
+        symbols: Optional preferred symbols. If empty, the latest run's top
+            rows are selected by suggested weight, score, and confidence.
+        as_of_date: Optional recommendation date ceiling.
+        limit: Maximum rows to return.
+
+    Returns:
+        Recommendation frame containing run/date/action/rationale fields.
+    """
+    date_clause = "AND runs.as_of_date <= ?" if as_of_date else ""
+    params: list[Any] = [as_of_date] if as_of_date else []
+    symbol_clause = ""
+    if symbols:
+        placeholders = ", ".join(["?"] * len(symbols))
+        symbol_clause = f"AND recommendations.symbol IN ({placeholders})"
+        params.extend(symbols)
+    params.append(int(limit))
+    return _frame(
+        f"""
+        WITH latest_run AS (
+            SELECT run_id, as_of_date, created_at
+            FROM agent_recommendation_runs runs
+            WHERE status = 'success'
+              {date_clause}
+            ORDER BY as_of_date DESC, created_at DESC
+            LIMIT 1
+        )
+        SELECT recommendations.run_id,
+               recommendations.as_of_date,
+               recommendations.symbol,
+               recommendations.recommendation,
+               recommendations.confidence,
+               recommendations.score,
+               recommendations.risk_level,
+               recommendations.suggested_weight,
+               recommendations.rationale_json
+        FROM agent_recommendations recommendations
+        INNER JOIN latest_run
+          ON recommendations.run_id = latest_run.run_id
+        WHERE 1=1
+          {symbol_clause}
+        ORDER BY recommendations.suggested_weight DESC,
+                 recommendations.score DESC,
+                 recommendations.confidence DESC,
+                 recommendations.symbol
+        LIMIT ?
+        """,
+        params,
+    )
+
+
+def _latest_context_rows_for_signals(symbols: list[str], as_of_date: date | None) -> pd.DataFrame:
+    """Load latest mart context rows for selected symbols.
+
+    Args:
+        symbols: Symbols to fetch.
+        as_of_date: Optional context date ceiling, usually recommendation
+            `as_of_date`.
+
+    Returns:
+        Latest available `mart_agent_context_daily` row per symbol.
+    """
+    if not symbols:
+        return pd.DataFrame()
+    placeholders = ", ".join(["?"] * len(symbols))
+    date_clause = "AND trading_date <= ?" if as_of_date else ""
+    params: list[Any] = list(symbols)
+    if as_of_date:
+        params.append(as_of_date)
+    return _frame(
+        f"""
+        WITH ranked AS (
+            SELECT *,
+                   row_number() OVER (PARTITION BY symbol ORDER BY trading_date DESC) AS rn
+            FROM analytics_marts.mart_agent_context_daily
+            WHERE symbol IN ({placeholders})
+              {date_clause}
+        )
+        SELECT *
+        FROM ranked
+        WHERE rn = 1
+        """,
+        params,
+    )
+
+
+def _compact_symbol_signals(portfolio: dict[str, Any], limit: int = 10) -> list[dict[str, Any]]:
+    """Build detailed symbol-level signal context for the live LLM prompt.
+
+    Args:
+        portfolio: Portfolio summary from `collect_portfolio_summary`.
+        limit: Maximum number of symbols included in the compact prompt.
+
+    Returns:
+        List of compact signal dictionaries combining latest agent
+        recommendations, deterministic rationale, and dbt mart features.
+    """
+    try:
+        as_of_raw = portfolio.get("as_of_date")
+        as_of_date = pd.Timestamp(as_of_raw).date() if as_of_raw else None
+    except Exception:
+        as_of_date = None
+
+    preferred_symbols = _portfolio_signal_symbols(portfolio, limit)
+    recommendations = _latest_recommendation_rows_for_signals(
+        symbols=preferred_symbols,
+        as_of_date=as_of_date,
+        limit=limit,
+    )
+    if recommendations.empty:
+        return []
+
+    symbols = [str(symbol).upper() for symbol in recommendations["symbol"].tolist()]
+    context = _latest_context_rows_for_signals(symbols, as_of_date)
+    context_by_symbol = {
+        str(row["symbol"]).upper(): row
+        for _, row in context.iterrows()
+    }
+
+    compact: list[dict[str, Any]] = []
+    for _, rec in recommendations.iterrows():
+        symbol = str(rec.get("symbol") or "").upper()
+        ctx = context_by_symbol.get(symbol)
+        rationale = _safe_json_loads(rec.get("rationale_json"))
+        symbol_rationale = rationale.get("symbol", {}) if isinstance(rationale.get("symbol"), dict) else {}
+        market_rationale = rationale.get("market", {}) if isinstance(rationale.get("market"), dict) else {}
+        risk_rationale = rationale.get("risk", {}) if isinstance(rationale.get("risk"), dict) else {}
+        quality_rationale = rationale.get("quality", {}) if isinstance(rationale.get("quality"), dict) else {}
+        component_scores = symbol_rationale.get("component_scores", {})
+        compact.append(
+            {
+                "symbol": symbol,
+                "recommendation": rec.get("recommendation"),
+                "score": _round_optional(rec.get("score"), 4),
+                "confidence": _round_optional(rec.get("confidence"), 4),
+                "risk_level": rec.get("risk_level"),
+                "suggested_weight": _round_optional(rec.get("suggested_weight"), 6),
+                "source": {
+                    "recommendation_as_of_date": str(rec.get("as_of_date")) if rec.get("as_of_date") is not None else None,
+                    "context_date": str(ctx.get("trading_date")) if ctx is not None and ctx.get("trading_date") is not None else None,
+                },
+                "signals": {
+                    "close": _round_optional(ctx.get("close")) if ctx is not None else None,
+                    "volume": _round_optional(ctx.get("volume"), 0) if ctx is not None else None,
+                    "return_1d": _round_optional(ctx.get("return_1d"), 6) if ctx is not None else None,
+                    "return_5d": _round_optional(ctx.get("return_5d"), 6) if ctx is not None else None,
+                    "return_20d": _round_optional(ctx.get("return_20d"), 6) if ctx is not None else None,
+                    "return_60d": _round_optional(ctx.get("return_60d"), 6) if ctx is not None else None,
+                    "volatility_20d": _round_optional(ctx.get("volatility_20d"), 6) if ctx is not None else None,
+                    "volatility_60d": _round_optional(ctx.get("volatility_60d"), 6) if ctx is not None else None,
+                    "drawdown_from_peak": _round_optional(ctx.get("drawdown_from_peak"), 6) if ctx is not None else None,
+                    "relative_strength_20d": _round_optional(ctx.get("relative_strength_20d"), 6)
+                    if ctx is not None
+                    else None,
+                    "relative_strength_60d": _round_optional(ctx.get("relative_strength_60d"), 6)
+                    if ctx is not None
+                    else None,
+                    "traded_value_percentile": _round_optional(ctx.get("traded_value_cross_section_percentile"), 2)
+                    if ctx is not None
+                    else None,
+                    "trend_state": ctx.get("trend_state") if ctx is not None else symbol_rationale.get("trend_state"),
+                    "agent_candidate_state": ctx.get("agent_candidate_state") if ctx is not None else None,
+                    "liquidity_state": ctx.get("liquidity_state") if ctx is not None else None,
+                    "data_quality_status": ctx.get("data_quality_status")
+                    if ctx is not None
+                    else quality_rationale.get("data_quality_status"),
+                    "stale_days": int(ctx.get("stale_days"))
+                    if ctx is not None and ctx.get("stale_days") is not None and not pd.isna(ctx.get("stale_days"))
+                    else quality_rationale.get("stale_days"),
+                },
+                "market_context": {
+                    "market_regime": ctx.get("market_regime") if ctx is not None else market_rationale.get("market_regime"),
+                    "volatility_regime": ctx.get("volatility_regime") if ctx is not None else market_rationale.get("volatility_regime"),
+                    "regime_score": _round_optional(ctx.get("regime_score"), 4)
+                    if ctx is not None
+                    else _round_optional(market_rationale.get("regime_score"), 4),
+                },
+                "component_scores": {
+                    "trend": _round_optional(component_scores.get("trend"), 4),
+                    "relative_strength": _round_optional(component_scores.get("relative_strength"), 4),
+                    "momentum": _round_optional(component_scores.get("momentum"), 4),
+                    "volatility": _round_optional(component_scores.get("volatility"), 4),
+                    "liquidity": _round_optional(component_scores.get("liquidity"), 4),
+                },
+                "rationale_summary": {
+                    "quality_blocked": quality_rationale.get("blocked"),
+                    "quality_reasons": quality_rationale.get("reasons"),
+                    "market": _round_optional(market_rationale.get("contribution"), 4),
+                    "symbol": _round_optional(symbol_rationale.get("contribution"), 4),
+                    "risk_drawdown": _round_optional(risk_rationale.get("drawdown_from_peak"), 6),
+                },
+            }
+        )
+    return compact
 
 
 def _build_llm_messages(
@@ -905,7 +1167,7 @@ def _build_llm_messages(
         ensure_ascii=False,
         default=_json_default,
         sort_keys=True,
-        indent=2,
+        separators=(",", ":"),
     )
     system_prompt = (
         "You are BQuant's live investment-analysis assistant. "
@@ -1056,7 +1318,7 @@ def answer_live_system_question(question: str) -> dict[str, Any]:
     availability = sections.get("llm_runtime", {}).get("availability") or {}
     if availability.get("available"):
         try:
-            knowledge_context = render_knowledge_context(question, limit=5, max_total_chars=6000)
+            knowledge_context = render_knowledge_context(question, limit=2, max_total_chars=2000)
             llm_response = chat_completion(
                 _build_llm_messages(question, sections, knowledge_context=knowledge_context),
                 config=config,

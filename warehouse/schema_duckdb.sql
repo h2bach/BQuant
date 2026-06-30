@@ -445,6 +445,30 @@ CREATE TABLE IF NOT EXISTS demo_trading_orders (
 CREATE INDEX IF NOT EXISTS idx_demo_trading_orders_account_time ON demo_trading_orders(account_id, trade_time);
 CREATE INDEX IF NOT EXISTS idx_demo_trading_orders_symbol ON demo_trading_orders(symbol);
 
+CREATE OR REPLACE VIEW v_demo_trading_trade_history AS
+SELECT
+    account_id,
+    trade_time,
+    trade_date,
+    action,
+    symbol,
+    quantity,
+    price,
+    gross_amount,
+    fees,
+    taxes,
+    net_amount,
+    realized_pnl,
+    status,
+    settlement_date,
+    settlement_ts,
+    source,
+    source_run_id,
+    recommendation,
+    rationale_json,
+    created_at
+FROM demo_trading_orders;
+
 CREATE TABLE IF NOT EXISTS demo_trading_lots (
     lot_id VARCHAR PRIMARY KEY,
     account_id VARCHAR NOT NULL,

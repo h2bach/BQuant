@@ -28,6 +28,8 @@ SELL_TAX_RATE = 0.001
 SETTLEMENT_CUTOFF = time(hour=13, minute=0)
 PRICE_VND_MULTIPLIER = 1000.0
 PRICE_ALREADY_VND_THRESHOLD = 1000.0
+DEFAULT_ANALYSIS_ENTRY_DATE = date(2026, 6, 15)
+DEFAULT_ANALYSIS_AS_OF_DATE = date(2026, 6, 30)
 LOGGER = BQuantLogger("web_demo_trading", component="web", subcomponent="demo_trading", default_channel="web")
 
 
@@ -166,6 +168,33 @@ def ensure_demo_trading_tables() -> None:
             """,
             [DEFAULT_ACCOUNT_ID, DEFAULT_ACCOUNT_NAME, INITIAL_CASH, INITIAL_CASH, BOARD_LOT],
         )
+        conn.execute(
+            """
+            CREATE OR REPLACE VIEW v_demo_trading_trade_history AS
+            SELECT
+                account_id,
+                trade_time,
+                trade_date,
+                action,
+                symbol,
+                quantity,
+                price,
+                gross_amount,
+                fees,
+                taxes,
+                net_amount,
+                realized_pnl,
+                status,
+                settlement_date,
+                settlement_ts,
+                source,
+                source_run_id,
+                recommendation,
+                rationale_json,
+                created_at
+            FROM demo_trading_orders
+            """
+        )
 
 
 def _today() -> date:
@@ -192,6 +221,30 @@ def _add_trading_days(anchor: date, trading_days: int) -> date:
     return current
 
 
+def _trading_days_elapsed(start_date: date, end_date: date) -> int:
+    """Count trading days elapsed after a trade date.
+
+    Args:
+        start_date: Trade date of a lot.
+        end_date: Current local market date.
+
+    Returns:
+        Number of configured trading days between `start_date` exclusive and
+        `end_date` inclusive. A same-day lot is `0`, the next trading day is
+        `1`, and the second trading day before the 13:00 settlement cutoff is
+        `2`.
+    """
+    if end_date <= start_date:
+        return 0
+    current = start_date
+    elapsed = 0
+    while current < end_date:
+        current += timedelta(days=1)
+        if is_trading_day(current):
+            elapsed += 1
+    return elapsed
+
+
 def _settlement_timestamp(trade_date: date) -> datetime:
     """Return the T+2.5 settlement timestamp for a trade date."""
     settlement_date = _add_trading_days(trade_date, 2)
@@ -212,6 +265,45 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
     except (TypeError, ValueError):
         return default
     return result if math.isfinite(result) else default
+
+
+def _safe_json(value: Any) -> dict[str, Any]:
+    """Parse a JSON object field into a dictionary.
+
+    Args:
+        value: Raw JSON string, dictionary, or null-like value from DuckDB.
+
+    Returns:
+        Parsed dictionary. Invalid JSON returns an empty dictionary so analysis
+        rendering remains resilient to malformed rationale payloads.
+    """
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _coerce_date(value: Any, default: date) -> date:
+    """Convert user/date-control input into a Python date.
+
+    Args:
+        value: Date, datetime, pandas timestamp, ISO date string, or null.
+        default: Fallback date when conversion fails.
+
+    Returns:
+        Valid date for warehouse queries.
+    """
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return pd.Timestamp(value).date()
+    except (TypeError, ValueError):
+        return default
 
 
 def _to_vnd_price(value: Any) -> float:
@@ -291,40 +383,75 @@ def _load_account() -> dict[str, Any]:
 
 
 def _load_positions(moment: datetime | None = None) -> list[dict[str, Any]]:
-    """Load current open lots aggregated by symbol."""
+    """Load current open lots aggregated by symbol with T+ settlement buckets."""
     current = (moment or now_local()).replace(tzinfo=None)
     ensure_demo_trading_tables()
     with get_connection(read_only=True) as conn:
         rows = conn.execute(
             """
             SELECT symbol,
-                   sum(remaining_quantity) AS quantity,
-                   sum(CASE WHEN settlement_ts <= ? THEN remaining_quantity ELSE 0 END) AS sellable_quantity,
-                   sum(remaining_quantity * avg_cost) / nullif(sum(remaining_quantity), 0) AS avg_cost,
-                   sum(remaining_quantity * avg_cost) AS cost_basis,
-                   min(settlement_ts) AS first_settlement_ts,
-                   max(settlement_ts) AS last_settlement_ts
+                   trade_date,
+                   settlement_ts,
+                   remaining_quantity,
+                   avg_cost
             FROM demo_trading_lots
             WHERE account_id = ?
               AND remaining_quantity > 0
               AND status = 'open'
-            GROUP BY symbol
-            ORDER BY symbol
+            ORDER BY symbol, trade_date, created_at, lot_id
             """,
-            [current, DEFAULT_ACCOUNT_ID],
+            [DEFAULT_ACCOUNT_ID],
         ).fetchall()
-    return [
-        {
-            "symbol": row[0],
-            "quantity": int(row[1] or 0),
-            "sellable_quantity": int(row[2] or 0),
-            "avg_cost": _safe_float(row[3]),
-            "cost_basis": _safe_float(row[4]),
-            "first_settlement_ts": str(row[5]) if row[5] else "",
-            "last_settlement_ts": str(row[6]) if row[6] else "",
-        }
-        for row in rows
-    ]
+    positions: dict[str, dict[str, Any]] = {}
+    for symbol_raw, trade_date_raw, settlement_ts_raw, quantity_raw, avg_cost_raw in rows:
+        symbol = str(symbol_raw)
+        quantity = int(quantity_raw or 0)
+        avg_cost = _safe_float(avg_cost_raw)
+        trade_date = pd.Timestamp(trade_date_raw).date()
+        settlement_ts = pd.Timestamp(settlement_ts_raw).to_pydatetime()
+        bucket = "sellable_quantity"
+        if settlement_ts > current:
+            age = _trading_days_elapsed(trade_date, current.date())
+            if age <= 0:
+                bucket = "t0_quantity"
+            elif age == 1:
+                bucket = "t1_quantity"
+            else:
+                bucket = "t2_quantity"
+
+        position = positions.setdefault(
+            symbol,
+            {
+                "symbol": symbol,
+                "quantity": 0,
+                "t0_quantity": 0,
+                "t1_quantity": 0,
+                "t2_quantity": 0,
+                "sellable_quantity": 0,
+                "avg_cost": 0.0,
+                "cost_basis": 0.0,
+                "first_settlement_ts": "",
+                "last_settlement_ts": "",
+            },
+        )
+        position["quantity"] += quantity
+        position[bucket] += quantity
+        position["cost_basis"] += quantity * avg_cost
+        position["first_settlement_ts"] = (
+            str(settlement_ts)
+            if not position["first_settlement_ts"] or str(settlement_ts) < position["first_settlement_ts"]
+            else position["first_settlement_ts"]
+        )
+        position["last_settlement_ts"] = (
+            str(settlement_ts)
+            if not position["last_settlement_ts"] or str(settlement_ts) > position["last_settlement_ts"]
+            else position["last_settlement_ts"]
+        )
+
+    for position in positions.values():
+        quantity = int(position["quantity"])
+        position["avg_cost"] = position["cost_basis"] / quantity if quantity > 0 else 0.0
+    return sorted(positions.values(), key=lambda item: item["symbol"])
 
 
 def _latest_recommendations(max_as_of_date: date | None = None) -> pd.DataFrame:
@@ -369,6 +496,247 @@ def _latest_recommendations(max_as_of_date: date | None = None) -> pd.DataFrame:
             """,
             params,
         ).df()
+
+
+def add_symbol_to_portfolio(symbol: str, quantity: int) -> dict[str, Any]:
+    """Buy a requested quantity of one symbol in the demo ledger.
+
+    Args:
+        symbol: VN30 ticker to add or top up. The value is normalized to uppercase
+            and must have a latest close in `daily_ohlcv_base`.
+        quantity: Number of shares to buy. The value must be a positive multiple
+            of the account board lot, currently 100 shares.
+
+    Returns:
+        Filled BUY order summary plus latest-price metadata.
+
+    Raises:
+        ValueError: If the symbol has no latest price, quantity is invalid, or
+            available cash is insufficient.
+
+    Side Effects:
+        Places a normal demo BUY order and creates a T+2.5-settled lot. The
+        order is recorded in `demo_trading_orders` and appears in trade
+        history.
+    """
+    ensure_demo_trading_tables()
+    resolved_symbol = symbol.upper().strip()
+    if not resolved_symbol:
+        raise ValueError("Symbol is required")
+
+    requested_quantity = int(_safe_float(quantity))
+    if requested_quantity <= 0:
+        raise ValueError("Quantity must be positive")
+
+    account = _load_account()
+    board_lot = int(account["board_lot"])
+    if requested_quantity % board_lot != 0:
+        raise ValueError(f"Quantity must be a multiple of the board lot ({board_lot})")
+
+    prices = _latest_price_map()
+    price_meta = prices.get(resolved_symbol)
+    price = _safe_float(price_meta.get("close") if price_meta else None)
+    if price <= 0:
+        raise ValueError(f"No latest price available for {resolved_symbol}")
+
+    rationale = {
+        "source": "manual_add_symbol",
+        "requested_quantity": requested_quantity,
+        "cash_balance": _safe_float(account["cash_balance"]),
+        "board_lot": board_lot,
+        "latest_price_date": str(price_meta.get("trading_date") if price_meta else ""),
+    }
+    order = place_demo_order(
+        action="BUY",
+        symbol=resolved_symbol,
+        quantity=requested_quantity,
+        price_override=price,
+        source="manual_add_symbol",
+        recommendation="manual_quantity_order",
+        rationale_json=json.dumps(rationale, sort_keys=True),
+    )
+    order.update(
+        {
+            "latest_price_date": str(price_meta.get("trading_date") if price_meta else ""),
+        }
+    )
+    LOGGER.log_web_event(
+        "Added symbol to demo trading portfolio",
+        event_type="demo_trading_add_symbol",
+        status="success",
+        symbol=resolved_symbol,
+        quantity=requested_quantity,
+        price=round(price, 2),
+    )
+    return order
+
+
+def place_manual_trade(*, action: str, symbol: str, quantity: int, price: float) -> dict[str, Any]:
+    """Place an explicit manual BUY/SELL order from the PnL table.
+
+    Args:
+        action: Trade side, either `BUY` or `SELL`.
+        symbol: Ticker to trade.
+        quantity: Share quantity. Must be a positive board-lot multiple.
+        price: Explicit VND/share execution price supplied by the UI ticket.
+
+    Returns:
+        Filled order summary from the demo ledger.
+
+    Raises:
+        ValueError: If side, symbol, quantity, price, cash, or sellable-lot
+            constraints are invalid.
+
+    Side Effects:
+        Writes one order to `demo_trading_orders`, updates cash, and opens or
+        reduces lots. A full SELL closes the lots and the symbol disappears from
+        current positions naturally when remaining quantity reaches zero.
+    """
+    resolved_action = action.upper().strip()
+    resolved_symbol = symbol.upper().strip()
+    resolved_quantity = int(_safe_float(quantity))
+    resolved_price = _safe_float(price)
+    if resolved_action not in {"BUY", "SELL"}:
+        raise ValueError("Manual trade action must be BUY or SELL")
+    if not resolved_symbol:
+        raise ValueError("Symbol is required")
+    if resolved_quantity <= 0:
+        raise ValueError("Quantity must be positive")
+    if resolved_quantity % BOARD_LOT != 0:
+        raise ValueError(f"Quantity must be a multiple of the board lot ({BOARD_LOT})")
+    if resolved_price <= 0:
+        raise ValueError("Execution price must be positive")
+
+    rationale = {
+        "source": "manual_pnl_table",
+        "explicit_price": resolved_price,
+        "explicit_quantity": resolved_quantity,
+        "board_lot": BOARD_LOT,
+    }
+    return place_demo_order(
+        action=resolved_action,
+        symbol=resolved_symbol,
+        quantity=resolved_quantity,
+        price_override=resolved_price,
+        source="manual_pnl_table",
+        recommendation="manual_trade_ticket",
+        rationale_json=json.dumps(rationale, sort_keys=True),
+    )
+
+
+def estimate_manual_trade(*, action: str, symbol: str, quantity: int, price: float | None = None) -> dict[str, Any]:
+    """Estimate a manual trade before execution.
+
+    Args:
+        action: Trade side, `BUY` or `SELL`.
+        symbol: Ticker to estimate.
+        quantity: Requested share quantity.
+        price: Optional explicit VND/share execution price. When absent or
+            non-positive, the latest daily close is used when available.
+
+    Returns:
+        Preview payload containing price, gross amount, fees, taxes, net amount,
+        estimated cash balance after the trade, sellable quantity, and estimated
+        average cost after a BUY.
+
+    Side Effects:
+        Reads account, position, and latest price state only; does not write
+        the ledger.
+    """
+    ensure_demo_trading_tables()
+    resolved_action = action.upper().strip()
+    resolved_symbol = symbol.upper().strip()
+    resolved_quantity = int(_safe_float(quantity))
+    account = _load_account()
+    positions = {row["symbol"]: row for row in _load_positions()}
+    current_position = positions.get(resolved_symbol, {})
+    latest_price_meta = _latest_price_map().get(resolved_symbol, {})
+    resolved_price = _safe_float(price)
+    if resolved_price <= 0:
+        resolved_price = _safe_float(latest_price_meta.get("close"))
+
+    gross = max(0, resolved_quantity) * max(0.0, resolved_price)
+    fees = 0.0
+    taxes = 0.0
+    net_amount = 0.0
+    cash_change = 0.0
+    validation_message = ""
+    if resolved_action == "BUY":
+        fees = gross * BUY_FEE_RATE
+        net_amount = gross + fees
+        cash_change = -net_amount
+    elif resolved_action == "SELL":
+        fees = gross * SELL_FEE_RATE
+        taxes = gross * SELL_TAX_RATE
+        net_amount = gross - fees - taxes
+        cash_change = net_amount
+    else:
+        validation_message = "Action must be BUY or SELL"
+
+    cash_balance = _safe_float(account["cash_balance"])
+    current_quantity = int(current_position.get("quantity", 0) or 0)
+    sellable_quantity = int(current_position.get("sellable_quantity", 0) or 0)
+    current_cost_basis = _safe_float(current_position.get("cost_basis"))
+    current_avg_cost = _safe_float(current_position.get("avg_cost"))
+    estimated_avg_cost = current_avg_cost
+    estimated_realized_pnl = 0.0
+    if resolved_action == "BUY" and resolved_quantity > 0:
+        estimated_quantity = current_quantity + resolved_quantity
+        estimated_avg_cost = (current_cost_basis + net_amount) / estimated_quantity if estimated_quantity > 0 else 0.0
+    elif resolved_action == "SELL" and resolved_quantity > 0:
+        remaining_to_sell = min(resolved_quantity, sellable_quantity)
+        sold_cost_basis = 0.0
+        for lot in _sellable_lots(resolved_symbol):
+            if remaining_to_sell <= 0:
+                break
+            lot_quantity = int(lot["remaining_quantity"])
+            sell_quantity = min(lot_quantity, remaining_to_sell)
+            sold_cost_basis += sell_quantity * _safe_float(lot["avg_cost"])
+            remaining_to_sell -= sell_quantity
+        estimated_realized_pnl = net_amount - sold_cost_basis if resolved_quantity <= sellable_quantity else 0.0
+        estimated_remaining_quantity = max(0, current_quantity - min(resolved_quantity, sellable_quantity))
+        estimated_remaining_cost = max(0.0, current_cost_basis - sold_cost_basis)
+        estimated_avg_cost = (
+            estimated_remaining_cost / estimated_remaining_quantity
+            if estimated_remaining_quantity > 0
+            else 0.0
+        )
+
+    if not validation_message:
+        if not resolved_symbol:
+            validation_message = "Symbol is required"
+        elif resolved_quantity <= 0:
+            validation_message = "Quantity must be positive"
+        elif resolved_quantity % BOARD_LOT != 0:
+            validation_message = f"Quantity must be a multiple of the board lot ({BOARD_LOT})"
+        elif resolved_price <= 0:
+            validation_message = "Execution price must be positive"
+        elif resolved_action == "BUY" and cash_balance < net_amount:
+            validation_message = f"Insufficient cash; need {net_amount:,.0f} VND"
+        elif resolved_action == "SELL" and resolved_quantity > sellable_quantity:
+            validation_message = f"Only {sellable_quantity:,} shares are sellable under T+2.5"
+
+    return {
+        "action": resolved_action,
+        "symbol": resolved_symbol,
+        "quantity": resolved_quantity,
+        "price": resolved_price,
+        "latest_price_date": str(latest_price_meta.get("trading_date") or ""),
+        "gross_amount": gross,
+        "fees": fees,
+        "taxes": taxes,
+        "net_amount": net_amount,
+        "cash_balance": cash_balance,
+        "cash_change": cash_change,
+        "cash_after": cash_balance + cash_change,
+        "current_quantity": current_quantity,
+        "sellable_quantity": sellable_quantity,
+        "current_avg_cost": current_avg_cost,
+        "estimated_avg_cost": estimated_avg_cost,
+        "estimated_realized_pnl": estimated_realized_pnl,
+        "is_valid": not validation_message,
+        "validation_message": validation_message,
+    }
 
 
 def import_portfolio(csv_text: str, *, cash_balance: float | None = None) -> dict[str, Any]:
@@ -726,6 +1094,382 @@ def _portfolio_equity(account: dict[str, Any], positions: list[dict[str, Any]], 
     return _safe_float(account["cash_balance"]) + market_value
 
 
+def _historical_price_points(symbols: list[str], entry_date: date, as_of_date: date) -> dict[str, dict[str, Any]]:
+    """Load entry and current prices for a list of symbols.
+
+    Args:
+        symbols: Tickers to analyze.
+        entry_date: Desired buy date. The query uses the first trading row on
+            or after this date, capped by `as_of_date`.
+        as_of_date: Current data ceiling. The query uses the latest trading row
+            on or before this date.
+
+    Returns:
+        Mapping keyed by symbol with entry/current date and VND/share prices.
+    """
+    if not symbols:
+        return {}
+    placeholders = ", ".join(["?"] * len(symbols))
+    with get_connection(read_only=True) as conn:
+        rows = conn.execute(
+            f"""
+            WITH entry_ranked AS (
+                SELECT
+                    symbol,
+                    trading_date,
+                    open AS entry_open,
+                    row_number() OVER (PARTITION BY symbol ORDER BY trading_date ASC) AS rn
+                FROM daily_ohlcv_base
+                WHERE symbol IN ({placeholders})
+                  AND trading_date >= ?
+                  AND trading_date <= ?
+            ),
+            current_ranked AS (
+                SELECT
+                    symbol,
+                    trading_date,
+                    close AS current_close,
+                    row_number() OVER (PARTITION BY symbol ORDER BY trading_date DESC) AS rn
+                FROM daily_ohlcv_base
+                WHERE symbol IN ({placeholders})
+                  AND trading_date <= ?
+            )
+            SELECT
+                coalesce(entry_ranked.symbol, current_ranked.symbol) AS symbol,
+                entry_ranked.trading_date AS entry_date,
+                entry_ranked.entry_open,
+                current_ranked.trading_date AS current_date,
+                current_ranked.current_close
+            FROM entry_ranked
+            FULL OUTER JOIN current_ranked
+              ON entry_ranked.symbol = current_ranked.symbol
+             AND entry_ranked.rn = 1
+             AND current_ranked.rn = 1
+            WHERE coalesce(entry_ranked.rn, 1) = 1
+              AND coalesce(current_ranked.rn, 1) = 1
+            """,
+            [*symbols, entry_date, as_of_date, *symbols, as_of_date],
+        ).fetchall()
+    return {
+        str(row[0]): {
+            "entry_date": pd.Timestamp(row[1]).date() if row[1] else None,
+            "entry_price": _to_vnd_price(row[2]),
+            "current_date": pd.Timestamp(row[3]).date() if row[3] else None,
+            "current_price": _to_vnd_price(row[4]),
+        }
+        for row in rows
+    }
+
+
+def _context_rows(symbols: list[str], as_of_date: date) -> dict[str, dict[str, Any]]:
+    """Load latest dbt agent context rows for symbols.
+
+    Args:
+        symbols: Symbols to fetch from `analytics_marts.mart_agent_context_daily`.
+        as_of_date: Latest allowed context date.
+
+    Returns:
+        Mapping keyed by symbol with trend, liquidity, return, volatility, and
+        market-regime features.
+    """
+    if not symbols:
+        return {}
+    placeholders = ", ".join(["?"] * len(symbols))
+    with get_connection(read_only=True) as conn:
+        rows = conn.execute(
+            f"""
+            WITH ranked AS (
+                SELECT
+                    symbol,
+                    trading_date,
+                    close,
+                    return_1d,
+                    return_5d,
+                    return_20d,
+                    return_60d,
+                    volatility_20d,
+                    volatility_60d,
+                    drawdown_from_peak,
+                    relative_strength_20d,
+                    relative_strength_60d,
+                    traded_value_cross_section_percentile,
+                    volume_to_avg_20d,
+                    trend_state,
+                    liquidity_state,
+                    market_regime,
+                    volatility_regime,
+                    regime_score,
+                    data_quality_status,
+                    stale_days,
+                    row_number() OVER (PARTITION BY symbol ORDER BY trading_date DESC) AS rn
+                FROM analytics_marts.mart_agent_context_daily
+                WHERE symbol IN ({placeholders})
+                  AND trading_date <= ?
+            )
+            SELECT *
+            FROM ranked
+            WHERE rn = 1
+            """,
+            [*symbols, as_of_date],
+        ).df()
+    return {str(row["symbol"]): row.to_dict() for _, row in rows.iterrows()}
+
+
+def _recommendation_rows(symbols: list[str], as_of_date: date) -> dict[str, dict[str, Any]]:
+    """Load latest agent recommendations for the requested symbols.
+
+    Args:
+        symbols: Symbols to keep from the latest recommendation run.
+        as_of_date: Latest allowed recommendation date.
+
+    Returns:
+        Mapping keyed by symbol with score, confidence, risk, recommendation,
+        and parsed rationale JSON.
+    """
+    if not symbols:
+        return {}
+    frame = _latest_recommendations(max_as_of_date=as_of_date)
+    if frame.empty:
+        return {}
+    filtered = frame[frame["symbol"].astype(str).isin(symbols)].copy()
+    result: dict[str, dict[str, Any]] = {}
+    for _, row in filtered.iterrows():
+        item = row.to_dict()
+        item["rationale"] = _safe_json(item.get("rationale_json"))
+        result[str(item["symbol"])] = item
+    return result
+
+
+def _trend_bucket(value: float, *, neutral_band: float = 0.005) -> str:
+    """Classify a return-like value for UI color rendering."""
+    if value > neutral_band:
+        return "positive"
+    if value < -neutral_band:
+        return "negative"
+    return "neutral"
+
+
+def _suggest_portfolio_action(
+    *,
+    recommendation: str,
+    risk_level: str,
+    trend_state: str,
+    gross_return: float,
+    return_5d: float,
+    score: float,
+) -> str:
+    """Convert current agent state and PnL into a portfolio action bucket."""
+    if recommendation in {"avoid_or_reduce", "blocked_data_quality"} or score <= 0.30:
+        return "SELL"
+    if trend_state == "downtrend" and (gross_return < -0.03 or return_5d < -0.02):
+        return "SELL"
+    if risk_level == "high" and (trend_state != "uptrend" or return_5d < 0):
+        return "TRIM"
+    if recommendation == "candidate_long" or score >= 0.45:
+        return "HOLD"
+    return "WATCH"
+
+
+def _analysis_reasons(
+    *,
+    symbol: str,
+    recommendation: str,
+    score: float,
+    confidence: float,
+    risk_level: str,
+    trend_state: str,
+    liquidity_state: str,
+    gross_return: float,
+    return_5d: float,
+    return_20d: float,
+    relative_strength_20d: float,
+    component_scores: dict[str, Any],
+    action: str,
+) -> dict[str, str]:
+    """Build concise Vietnamese explanations for buy/hold/sell decisions."""
+    trend_score = _safe_float(component_scores.get("trend"), default=0.5)
+    momentum_score = _safe_float(component_scores.get("momentum"), default=0.5)
+    liquidity_score = _safe_float(component_scores.get("liquidity"), default=0.5)
+    buy_reason = (
+        f"Mở mua {symbol} theo watchlist/risk-adjusted deployment: score {score:.3f}, "
+        f"confidence {confidence:.3f}, trend={trend_state}, risk={risk_level}. "
+        f"Component trend/momentum/liquidity lần lượt {trend_score:.2f}/{momentum_score:.2f}/{liquidity_score:.2f}."
+    )
+    hold_reason = (
+        f"Nắm giữ khi recommendation hiện tại là {recommendation}, PnL từ điểm mua {gross_return:+.2%}, "
+        f"return 5D {return_5d:+.2%}, return 20D {return_20d:+.2%}, RS20 {relative_strength_20d:+.2%}, "
+        f"liquidity={liquidity_state}."
+    )
+    if action == "SELL":
+        sell_reason = (
+            "Ưu tiên bán nếu tín hiệu hiện tại chuyển sang avoid/reduce, score yếu, hoặc downtrend kèm mất động lượng. "
+            f"Trạng thái hiện tại: action={action}, trend={trend_state}, risk={risk_level}."
+        )
+    elif action == "TRIM":
+        sell_reason = (
+            "Chưa cần bán toàn bộ, nhưng nên giảm tỷ trọng nếu rủi ro cao tiếp tục đi kèm động lượng ngắn hạn yếu. "
+            f"Trạng thái hiện tại: action={action}, risk={risk_level}, return 5D {return_5d:+.2%}."
+        )
+    else:
+        sell_reason = (
+            "Chưa có sell trigger rõ ràng; sell trigger cần theo dõi là score giảm dưới ngưỡng, trend chuyển downtrend, "
+            "hoặc thanh khoản/yếu tố relative strength xấu đi."
+        )
+    return {"buy": buy_reason, "hold": hold_reason, "sell": sell_reason}
+
+
+def load_demo_portfolio_analysis(
+    *,
+    entry_date: date | str | None = None,
+    as_of_date: date | str | None = None,
+    positions: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Calculate portfolio PnL and current agent analysis for demo holdings.
+
+    Args:
+        entry_date: Buy-point date. Defaults to `2026-06-15`, the first trading
+            date used by the deeper walk-forward smoke test.
+        as_of_date: Latest data date. Defaults to `2026-06-30`, matching the
+            current local dataset ceiling.
+        positions: Optional open positions from `_load_positions`. When omitted,
+            the function loads current demo positions itself.
+
+    Returns:
+        Summary and per-symbol analysis rows. Values are gross unless the field
+        name explicitly says `net`.
+    """
+    resolved_entry_date = _coerce_date(entry_date, DEFAULT_ANALYSIS_ENTRY_DATE)
+    resolved_as_of_date = _coerce_date(as_of_date, DEFAULT_ANALYSIS_AS_OF_DATE)
+    position_rows = positions if positions is not None else _load_positions()
+    symbols = [str(row["symbol"]) for row in position_rows]
+    price_points = _historical_price_points(symbols, resolved_entry_date, resolved_as_of_date)
+    contexts = _context_rows(symbols, resolved_as_of_date)
+    recommendations = _recommendation_rows(symbols, resolved_as_of_date)
+
+    rows: list[dict[str, Any]] = []
+    totals = {
+        "entry_value": 0.0,
+        "current_value": 0.0,
+        "gross_pnl": 0.0,
+        "net_if_closed_pnl": 0.0,
+        "buy_fees": 0.0,
+        "sell_fees_taxes": 0.0,
+    }
+    for position in position_rows:
+        symbol = str(position["symbol"])
+        quantity = int(position.get("quantity", 0) or 0)
+        price_meta = price_points.get(symbol, {})
+        entry_price = _safe_float(price_meta.get("entry_price"))
+        current_price = _safe_float(price_meta.get("current_price"))
+        entry_value = quantity * entry_price
+        current_value = quantity * current_price
+        gross_pnl = current_value - entry_value
+        gross_return = gross_pnl / entry_value if entry_value > 0 else 0.0
+        buy_fee = entry_value * BUY_FEE_RATE
+        sell_fee_tax = current_value * (SELL_FEE_RATE + SELL_TAX_RATE)
+        net_if_closed_pnl = current_value - sell_fee_tax - entry_value - buy_fee
+        net_if_closed_return = net_if_closed_pnl / (entry_value + buy_fee) if entry_value > 0 else 0.0
+
+        rec = recommendations.get(symbol, {})
+        ctx = contexts.get(symbol, {})
+        rationale = rec.get("rationale") or {}
+        symbol_rationale = rationale.get("symbol") if isinstance(rationale.get("symbol"), dict) else {}
+        component_scores = symbol_rationale.get("component_scores") if isinstance(symbol_rationale.get("component_scores"), dict) else {}
+        recommendation = str(rec.get("recommendation") or ctx.get("agent_candidate_state") or "watch")
+        score = _safe_float(rec.get("score"), default=0.0)
+        confidence = _safe_float(rec.get("confidence"), default=0.0)
+        risk_level = str(rec.get("risk_level") or "unknown")
+        trend_state = str(ctx.get("trend_state") or symbol_rationale.get("trend_state") or "neutral")
+        liquidity_state = str(ctx.get("liquidity_state") or "unknown")
+        return_5d = _safe_float(ctx.get("return_5d"))
+        return_20d = _safe_float(ctx.get("return_20d"))
+        relative_strength_20d = _safe_float(ctx.get("relative_strength_20d"))
+        action = _suggest_portfolio_action(
+            recommendation=recommendation,
+            risk_level=risk_level,
+            trend_state=trend_state,
+            gross_return=gross_return,
+            return_5d=return_5d,
+            score=score,
+        )
+        reasons = _analysis_reasons(
+            symbol=symbol,
+            recommendation=recommendation,
+            score=score,
+            confidence=confidence,
+            risk_level=risk_level,
+            trend_state=trend_state,
+            liquidity_state=liquidity_state,
+            gross_return=gross_return,
+            return_5d=return_5d,
+            return_20d=return_20d,
+            relative_strength_20d=relative_strength_20d,
+            component_scores=component_scores,
+            action=action,
+        )
+        rows.append(
+            {
+                "symbol": symbol,
+                "quantity": quantity,
+                "t0_quantity": int(position.get("t0_quantity", 0) or 0),
+                "t1_quantity": int(position.get("t1_quantity", 0) or 0),
+                "t2_quantity": int(position.get("t2_quantity", 0) or 0),
+                "sellable_quantity": int(position.get("sellable_quantity", 0) or 0),
+                "entry_date": str(price_meta.get("entry_date") or resolved_entry_date),
+                "entry_price": entry_price,
+                "current_date": str(price_meta.get("current_date") or resolved_as_of_date),
+                "current_price": current_price,
+                "entry_value": entry_value,
+                "current_value": current_value,
+                "gross_pnl": gross_pnl,
+                "gross_return": gross_return,
+                "net_if_closed_pnl": net_if_closed_pnl,
+                "net_if_closed_return": net_if_closed_return,
+                "return_bucket": _trend_bucket(gross_return),
+                "action": action,
+                "recommendation": recommendation,
+                "score": score,
+                "confidence": confidence,
+                "risk_level": risk_level,
+                "trend_state": trend_state,
+                "liquidity_state": liquidity_state,
+                "return_1d": _safe_float(ctx.get("return_1d")),
+                "return_5d": return_5d,
+                "return_20d": return_20d,
+                "return_60d": _safe_float(ctx.get("return_60d")),
+                "volatility_20d": _safe_float(ctx.get("volatility_20d")),
+                "volatility_60d": _safe_float(ctx.get("volatility_60d")),
+                "drawdown_from_peak": _safe_float(ctx.get("drawdown_from_peak")),
+                "relative_strength_20d": relative_strength_20d,
+                "relative_strength_60d": _safe_float(ctx.get("relative_strength_60d")),
+                "traded_value_percentile": _safe_float(ctx.get("traded_value_cross_section_percentile")),
+                "component_scores": component_scores,
+                "reasons": reasons,
+            }
+        )
+        totals["entry_value"] += entry_value
+        totals["current_value"] += current_value
+        totals["gross_pnl"] += gross_pnl
+        totals["net_if_closed_pnl"] += net_if_closed_pnl
+        totals["buy_fees"] += buy_fee
+        totals["sell_fees_taxes"] += sell_fee_tax
+
+    rows = sorted(rows, key=lambda item: item["gross_pnl"], reverse=True)
+    summary = {
+        **totals,
+        "entry_date": resolved_entry_date.isoformat(),
+        "as_of_date": resolved_as_of_date.isoformat(),
+        "gross_return": totals["gross_pnl"] / totals["entry_value"] if totals["entry_value"] > 0 else 0.0,
+        "net_if_closed_return": totals["net_if_closed_pnl"] / (totals["entry_value"] + totals["buy_fees"])
+        if totals["entry_value"] > 0
+        else 0.0,
+        "winners": sum(1 for row in rows if row["gross_pnl"] > 0),
+        "losers": sum(1 for row in rows if row["gross_pnl"] < 0),
+        "neutral": sum(1 for row in rows if row["gross_pnl"] == 0),
+    }
+    return {"summary": summary, "rows": rows}
+
+
 def _propose_action(
     *,
     recommendation: str,
@@ -766,8 +1510,21 @@ def _action_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
-def load_demo_trading_snapshot() -> dict[str, Any]:
-    """Load account, positions, daily plan, and recent order state for the UI."""
+def load_demo_trading_snapshot(
+    *,
+    analysis_entry_date: date | str | None = None,
+    analysis_as_of_date: date | str | None = None,
+) -> dict[str, Any]:
+    """Load account, positions, daily plan, trade history, and analysis state.
+
+    Args:
+        analysis_entry_date: Optional buy-point date for portfolio PnL analysis.
+        analysis_as_of_date: Optional current-data date for portfolio PnL
+            analysis.
+
+    Returns:
+        Snapshot payload consumed by the Demo Trading page.
+    """
     ensure_demo_trading_tables()
     account = _load_account()
     plan = _current_plan_row()
@@ -794,7 +1551,12 @@ def load_demo_trading_snapshot() -> dict[str, Any]:
         )
     equity = _safe_float(account["cash_balance"]) + total_market_value
     plan_items = _load_plan_items(plan["plan_id"]) if plan else []
-    orders = _load_recent_orders()
+    trade_history = _load_trade_history()
+    portfolio_analysis = load_demo_portfolio_analysis(
+        entry_date=analysis_entry_date,
+        as_of_date=analysis_as_of_date,
+        positions=positions,
+    )
     return {
         "account": account,
         "portfolio": {
@@ -808,7 +1570,9 @@ def load_demo_trading_snapshot() -> dict[str, Any]:
         "positions": enriched_positions,
         "plan": plan,
         "plan_items": plan_items,
-        "orders": orders,
+        "orders": trade_history,
+        "trade_history": trade_history,
+        "portfolio_analysis": portfolio_analysis,
     }
 
 
@@ -858,14 +1622,24 @@ def _load_plan_items(plan_id: str) -> list[dict[str, Any]]:
     ]
 
 
-def _load_recent_orders(limit: int = 30) -> list[dict[str, Any]]:
-    """Load recent demo orders."""
+def _load_trade_history(limit: int = 200) -> list[dict[str, Any]]:
+    """Load demo trading history for BUY, SELL, and seed/import events.
+
+    Args:
+        limit: Maximum number of most-recent ledger events to return.
+
+    Returns:
+        Display-ready trade events ordered from newest to oldest. The source is
+        `v_demo_trading_trade_history`, which projects the append-only order
+        ledger into a query-friendly history table.
+    """
     with get_connection(read_only=True) as conn:
         rows = conn.execute(
             """
             SELECT trade_time, action, symbol, quantity, price, gross_amount,
-                   fees, taxes, net_amount, realized_pnl, status, settlement_ts, source
-            FROM demo_trading_orders
+                   fees, taxes, net_amount, realized_pnl, status,
+                   settlement_date, settlement_ts, source, recommendation
+            FROM v_demo_trading_trade_history
             WHERE account_id = ?
             ORDER BY trade_time DESC, created_at DESC
             LIMIT ?
@@ -885,8 +1659,10 @@ def _load_recent_orders(limit: int = 30) -> list[dict[str, Any]]:
             "net_amount": _safe_float(row[8]),
             "realized_pnl": _safe_float(row[9]),
             "status": row[10],
-            "settlement_ts": str(row[11]) if row[11] else "",
-            "source": row[12],
+            "settlement_date": str(row[11]) if row[11] else "",
+            "settlement_ts": str(row[12]) if row[12] else "",
+            "source": row[13],
+            "recommendation": row[14],
         }
         for row in rows
     ]
