@@ -5,7 +5,11 @@ from __future__ import annotations
 from nicegui import ui
 from nicegui.client import Client
 
-from agents.system_analysis import answer_latest_system_question, load_latest_system_analysis
+from agents.system_analysis import (
+    answer_live_system_question,
+    load_latest_system_analysis,
+    load_recent_agent_chat_messages,
+)
 from apps.web.services.operations import trigger_action
 from utils.logger import BQuantLogger
 
@@ -22,31 +26,32 @@ def render_agents(client: Client):
 
     Side Effects:
         Creates manual action buttons, loads the latest system-analysis report,
-        and answers user questions from the stored deterministic analysis.
+        and answers user questions with fresh context plus a local LLM.
     """
     del client
-    ui.label("BQuant Agentic AI").classes("text-4xl font-bold")
+    ui.label("BQuant Agentic AI").classes("bq-page-title font-bold")
     ui.label("Data health, chart/TA analysis, and portfolio recommendation agents.").classes(
-        "text-sm text-slate-400"
+        "bq-page-subtitle text-sm"
     )
     ui.separator()
 
-    with ui.row().classes("w-full items-center gap-2"):
+    with ui.row().classes("bq-toolbar w-full"):
         ui.button("Back to Dashboard", on_click=lambda: ui.navigate.to("/"))
         ui.button("Operations", on_click=lambda: ui.navigate.to("/operations"))
         ui.button("Alerts", on_click=lambda: ui.navigate.to("/alerts"))
+        ui.button("Demo Trading", on_click=lambda: ui.navigate.to("/demo_trading"))
         ui.button("Refresh View", on_click=lambda: render_latest_report())
 
-    with ui.row().classes("w-full gap-2"):
+    with ui.row().classes("bq-toolbar w-full"):
         ui.button("Auto Update Data", on_click=lambda: _trigger("auto_update_data"))
         ui.button("Run System Analysis", on_click=lambda: _trigger("run_agent_system_analysis"))
         ui.button("Run Recommendation Cycle", on_click=lambda: _trigger("run_agent_cycle"))
 
     ui.separator()
 
-    summary_container = ui.row().classes("w-full gap-4")
-    report_container = ui.card().classes("w-full")
-    chat_container = ui.card().classes("w-full")
+    summary_container = ui.row().classes("bq-card-grid bq-metric-grid w-full")
+    report_container = ui.card().classes("bq-card w-full")
+    chat_container = ui.card().classes("bq-card w-full")
 
     def _trigger(action_name: str) -> None:
         """Submit one supported agent/operations action."""
@@ -104,7 +109,7 @@ def render_agents(client: Client):
                 ("LLM Enabled", str(llm_runtime.get("enabled", False))),
             ]
             for label, value in cards:
-                with ui.card().classes("min-w-[170px] flex-1"):
+                with ui.card().classes("bq-card"):
                     ui.label(label).classes("text-sm text-slate-400")
                     ui.label(value).classes("text-lg font-semibold")
 
@@ -115,38 +120,137 @@ def render_agents(client: Client):
 
         with chat_container:
             ui.label("Ask BQuant").classes("text-xl font-semibold")
-            ui.label("This v1 chat reads the latest deterministic report. LLM-backed explanation can be enabled later.").classes(
+            ui.label("Live chat collects fresh BQuant context and calls the local LLM; deterministic fallback stays available.").classes(
                 "text-sm text-slate-400"
             )
-            question = ui.textarea(label="Question", placeholder="Ask about data freshness, VNIndex/VN30 trend, or portfolio allocation.").classes(
-                "w-full"
+            chat_thread = ui.column().classes(
+                "bq-chat-thread w-full gap-3 max-h-[560px] overflow-y-auto rounded border border-slate-700 bg-slate-950/40 p-4"
             )
-            answer_box = ui.markdown("").classes("w-full")
+            status_label = ui.label("").classes("text-xs text-slate-400")
+            chat_history_empty = {"value": False}
+
+            def render_message(
+                *,
+                role: str,
+                content: str,
+                metadata: str | None = None,
+                pending: bool = False,
+            ) -> None:
+                """Render one chat bubble in the conversation thread."""
+                is_user = role == "user"
+                row_classes = "bq-chat-row justify-end" if is_user else "bq-chat-row justify-start"
+                bubble_classes = (
+                    "bq-chat-bubble rounded-lg px-4 py-3 shadow "
+                    + (
+                        "bg-blue-600 text-white"
+                        if is_user
+                        else "bg-slate-800 text-slate-100 border border-slate-700"
+                    )
+                )
+                with chat_thread:
+                    with ui.row().classes(row_classes):
+                        with ui.column().classes("gap-1"):
+                            with ui.card().classes(bubble_classes):
+                                if pending:
+                                    ui.spinner(size="sm").classes("mr-2")
+                                    ui.label(content).classes("text-sm")
+                                elif is_user:
+                                    ui.label(content).classes("whitespace-pre-wrap text-sm")
+                                else:
+                                    ui.markdown(content).classes("bq-markdown w-full text-sm")
+                            if metadata:
+                                align_class = "text-right" if is_user else "text-left"
+                                ui.label(metadata).classes(f"text-[11px] text-slate-500 {align_class}")
+
+            def render_chat_history() -> None:
+                """Load persisted chat history into the thread."""
+                chat_thread.clear()
+                try:
+                    rows = load_recent_agent_chat_messages(limit=12)
+                except Exception as exc:
+                    LOGGER.log_error(
+                        "load_recent_agent_chat_messages",
+                        type(exc).__name__,
+                        str(exc),
+                        context={},
+                        channel="web",
+                    )
+                    rows = []
+                if not rows:
+                    chat_history_empty["value"] = True
+                    with chat_thread:
+                        ui.label("No chat history yet. Ask a question to start.").classes("text-sm text-slate-500")
+                    return
+                chat_history_empty["value"] = False
+                for row in rows:
+                    render_message(
+                        role="user",
+                        content=str(row.get("question") or ""),
+                        metadata=str(row.get("event_ts") or ""),
+                    )
+                    latency = row.get("latency_seconds")
+                    latency_text = f", {float(latency):.1f}s" if latency is not None else ""
+                    metadata = f"{row.get('answer_source')} / {row.get('model') or 'deterministic'}{latency_text}"
+                    if row.get("error_message"):
+                        metadata = f"{metadata} / fallback: {row.get('error_message')}"
+                    render_message(
+                        role="assistant",
+                        content=str(row.get("answer_markdown") or ""),
+                        metadata=metadata,
+                    )
+
+            question = ui.textarea(
+                label="Message",
+                placeholder="Ask about data freshness, VNIndex/VN30 trend, or portfolio allocation.",
+            ).classes("w-full")
 
             def answer_question() -> None:
-                """Answer the user question from the latest stored analysis."""
-                if not str(question.value or "").strip():
+                """Answer the user question with live context and local LLM."""
+                user_question = str(question.value or "").strip()
+                if not user_question:
                     ui.notify("Enter a question first", type="warning", position="top")
                     return
                 try:
-                    answer_box.set_content(answer_latest_system_question(str(question.value)))
-                    answer_box.update()
+                    if chat_history_empty["value"]:
+                        chat_thread.clear()
+                    render_message(role="user", content=user_question, metadata="Now")
+                    render_message(role="assistant", content="Thinking with fresh BQuant context...", pending=True)
+                    status_label.set_text("Collecting fresh BQuant context and calling the local LLM...")
+                    status_label.update()
+                    result = answer_live_system_question(user_question)
+                    render_chat_history()
+                    question.value = ""
+                    question.update()
+                    model = result.get("model") or "deterministic"
+                    latency = result.get("latency_seconds")
+                    latency_text = f", {latency:.1f}s" if latency is not None else ""
+                    status_label.set_text(f"Answer source: {result['answer_source']} ({model}{latency_text})")
+                    status_label.update()
                     LOGGER.log_web_event(
                         "Answered BQuant agent question",
                         event_type="agent_chat",
                         status="success",
-                        question=str(question.value),
+                        question=user_question,
+                        answer_source=result["answer_source"],
+                        model=model,
+                        latency_seconds=latency,
                     )
                 except Exception as exc:
+                    status_label.set_text("Agent chat failed.")
+                    status_label.update()
                     LOGGER.log_error(
                         "answer_agent_question",
                         type(exc).__name__,
                         str(exc),
-                        context={"question": str(question.value)},
+                        context={"question": user_question},
                         channel="web",
                     )
                     ui.notify(f"Unable to answer question: {exc}", type="negative", position="top")
 
-            ui.button("Ask", on_click=answer_question)
+            with ui.row().classes("bq-control-row w-full justify-end"):
+                ui.button("Reload Chat", on_click=render_chat_history)
+                ui.button("Send", on_click=answer_question)
+
+            render_chat_history()
 
     render_latest_report()

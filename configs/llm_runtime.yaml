@@ -9,14 +9,17 @@
 # decision engine.
 
 runtime:
-  enabled: false
+  enabled: true
   backend: openai_compatible
   endpoint: http://127.0.0.1:8000/v1
   api_key_env: BQUANT_LLM_API_KEY
-  default_model: Qwen/Qwen2.5-7B-Instruct-AWQ
-  max_context_tokens: 32768
-  max_new_tokens: 1024
+  default_model: Qwen/Qwen2.5-3B-Instruct
+  max_context_tokens: 8192
+  max_new_tokens: 384
   temperature: 0.2
+  timeout_seconds: 180
+  fallback_to_deterministic: true
+  disable_thinking: false
 
 gpu_profile:
   name: NVIDIA RTX A4000
@@ -26,10 +29,23 @@ gpu_profile:
 
 candidate_models:
   primary:
+    model_id: Qwen/Qwen2.5-3B-Instruct
+    role: live_chat_orchestrator
+    quantization: none_fp16
+    runtime: vllm
+    reason: Active vLLM runtime on 2026-06-30; stable startup on RTX A4000 with 8k context.
+  larger_candidate:
     model_id: Qwen/Qwen2.5-7B-Instruct-AWQ
     role: chat_orchestrator
     quantization: AWQ 4-bit
-    reason: Strong multilingual/structured-output fit for Vietnamese finance explanations.
+    runtime: vllm
+    reason: Stronger target model, but initial AWQ load was slower; revisit after runtime tuning.
+  ollama_fallback_disabled:
+    model_id: qwen3:8b
+    role: local_chat_fallback
+    runtime: local_ollama
+    quantization: GGUF Q4_K_M
+    reason: Available locally, but disabled for BQuant because it ran on CPU rather than GPU in the current host check.
   fallback_open:
     model_id: mistralai/Mistral-7B-Instruct-v0.3
     role: function_calling_chat

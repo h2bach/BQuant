@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from nicegui import app, ui
 from nicegui.client import Client
 
+from apps.web.ui_responsive import apply_responsive_styles
 from warehouse.init_observability import initialize_observability
 from warehouse.observability_connection import get_observability_db_path
 from warehouse.refresh_state import ensure_refresh_state_table
@@ -100,11 +101,19 @@ def agents(client: Client):
     render_agents(client)
 
 
+@ui.page("/demo_trading")
+def demo_trading(client: Client):
+    """Demo trading page."""
+    from apps.web.pages.demo_trading import render_demo_trading
+    render_demo_trading(client)
+
+
 def main():
     """Run the NiceGUI application."""
     if not Path(get_observability_db_path()).exists():
         initialize_observability()
     ensure_refresh_state_table()
+    apply_responsive_styles()
     ui.run(
         title="BQuant Platform",
         port=6688,

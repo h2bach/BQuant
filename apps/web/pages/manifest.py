@@ -16,28 +16,30 @@ LOGGER = BQuantLogger("web_manifest", component="web", subcomponent="manifest", 
 
 def render_manifest(client: Client):
     """Render the data manifest page."""
-    ui.label("Data Manifest").classes("text-4xl font-bold")
+    del client
+    ui.label("Data Manifest").classes("bq-page-title font-bold")
     ui.separator()
     
-    with ui.row().classes("w-full"):
+    with ui.row().classes("bq-toolbar w-full"):
         ui.button("Back to Dashboard", on_click=lambda: ui.navigate.to("/"))
     
     ui.separator()
     
     # Filter options
-    dataset_filter = ui.select(
-        options=["all", "daily_ohlcv_10y", "intraday_ohlcv_15m_60d", "intraday_ohlcv_15m_delta"],
-        value="all"
-    )
-    status_filter = ui.select(
-        options=["all", "up_to_date", "stale", "awaiting_refresh_window", "pending_merge"],
-        value="all"
-    )
+    with ui.row().classes("bq-control-row w-full"):
+        dataset_filter = ui.select(
+            options=["all", "daily_ohlcv_10y", "intraday_ohlcv_15m_60d", "intraday_ohlcv_15m_delta"],
+            value="all"
+        ).classes("bq-control-field-wide")
+        status_filter = ui.select(
+            options=["all", "up_to_date", "stale", "awaiting_refresh_window", "pending_merge"],
+            value="all"
+        ).classes("bq-control-field-wide")
     
     ui.separator()
     
     # Manifest table
-    with ui.card().classes("w-full"):
+    with ui.card().classes("bq-table-card w-full"):
         ui.label("Dataset Files").classes("text-xl font-semibold")
         columns = [
             {"name": "dataset_name", "label": "Dataset Name", "field": "dataset_name", "sortable": True},
@@ -48,9 +50,10 @@ def render_manifest(client: Client):
             {"name": "file_size_bytes", "label": "File Size (Bytes)", "field": "file_size_bytes"},
             {"name": "last_refresh_at", "label": "Last Refresh", "field": "last_refresh_at"},
         ]
-        manifest_table = ui.table(columns=columns, rows=[])
+        manifest_table = ui.table(columns=columns, rows=[]).classes("bq-data-table")
         
-    ui.button("Refresh", on_click=lambda: load_manifest(dataset_filter.value, status_filter.value, manifest_table))
+    with ui.row().classes("bq-toolbar w-full"):
+        ui.button("Refresh", on_click=lambda: load_manifest(dataset_filter.value, status_filter.value, manifest_table))
     
     # Load initial data
     load_manifest("all", "all", manifest_table)

@@ -17,16 +17,17 @@ LOGGER = BQuantLogger("web_sql_lab", component="web", subcomponent="sql_lab", de
 
 def render_sql_lab(client: Client):
     """Render the SQL Lab page."""
-    ui.label("SQL Lab").classes("text-4xl font-bold")
+    del client
+    ui.label("SQL Lab").classes("bq-page-title font-bold")
     ui.separator()
     
-    with ui.row().classes("w-full"):
+    with ui.row().classes("bq-toolbar w-full"):
         ui.button("Back to Dashboard", on_click=lambda: ui.navigate.to("/"))
     
     ui.separator()
     
     # SQL editor
-    with ui.card().classes("w-full"):
+    with ui.card().classes("bq-card w-full"):
         ui.label("SQL Query").classes("text-xl font-semibold")
         sql_editor = ui.textarea(
             value="SELECT * FROM daily_ohlcv_base LIMIT 100",
@@ -36,9 +37,11 @@ def render_sql_lab(client: Client):
     ui.separator()
     
     # Results display
-    with ui.card().classes("w-full"):
+    with ui.card().classes("bq-table-card w-full"):
         ui.label("Query Results").classes("text-xl font-semibold")
-        results_table = ui.table(columns=[{"name": "result", "label": "result", "field": "result"}], rows=[])
+        results_table = ui.table(columns=[{"name": "result", "label": "result", "field": "result"}], rows=[]).classes(
+            "bq-data-table"
+        )
         
     ui.button("Execute Query", on_click=lambda: execute_query(sql_editor.value, results_table))
 

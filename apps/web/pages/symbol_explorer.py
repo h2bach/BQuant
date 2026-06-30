@@ -30,30 +30,30 @@ def render_symbol_explorer(client: Client):
     del client
     symbols = get_universe_symbols()
 
-    ui.label("Symbol Explorer").classes("text-4xl font-bold")
-    ui.label("Daily and intraday chart workspace for VN30 constituents.").classes("text-sm text-slate-400")
+    ui.label("Symbol Explorer").classes("bq-page-title font-bold")
+    ui.label("Daily and intraday chart workspace for VN30 constituents.").classes("bq-page-subtitle text-sm")
     ui.separator()
 
-    with ui.row().classes("w-full items-center justify-between gap-4"):
+    with ui.row().classes("bq-header-row w-full"):
         ui.button("Back to Dashboard", on_click=lambda: ui.navigate.to("/"))
-        with ui.row().classes("items-center gap-3"):
-            symbol_select = ui.select(options=symbols, value=symbols[0] if symbols else None).classes("w-36")
-            mode_select = ui.select(options=["daily", "intraday"], value="daily").classes("w-32")
-            range_select = ui.select(options=SYMBOL_DAILY_RANGE_OPTIONS, value="10Y").classes("w-32")
+        with ui.row().classes("bq-control-row"):
+            symbol_select = ui.select(options=symbols, value=symbols[0] if symbols else None).classes("bq-control-field")
+            mode_select = ui.select(options=["daily", "intraday"], value="daily").classes("bq-control-field")
+            range_select = ui.select(options=SYMBOL_DAILY_RANGE_OPTIONS, value="10Y").classes("bq-control-field")
             ui.button("Load", on_click=lambda: render_symbol_workspace())
 
     ui.separator()
-    metrics_container = ui.row().classes("w-full gap-4")
+    metrics_container = ui.row().classes("bq-card-grid bq-metric-grid w-full")
     note_container = ui.column().classes("w-full")
     chart_container = ui.column().classes("w-full")
 
-    with ui.card().classes("w-full"):
+    with ui.card().classes("bq-table-card w-full"):
         ui.label("OHLCV Data").classes("text-xl font-semibold")
         table = ui.table(
             columns=[],
             rows=[],
             pagination={"rowsPerPage": 15},
-        ).props(':rows-per-page-options="[15, 20, 50]"')
+        ).props(':rows-per-page-options="[15, 20, 50]"').classes("bq-data-table")
 
     def sync_range_options() -> None:
         """Swap range presets when daily/intraday mode changes.
@@ -109,7 +109,7 @@ def render_symbol_explorer(client: Client):
 
         with metrics_container:
             for metric in metrics:
-                with ui.card().classes("min-w-[170px] flex-1"):
+                with ui.card().classes("bq-card"):
                     ui.label(metric["label"]).classes("text-sm text-slate-400")
                     ui.label(metric["value"]).classes("text-xl font-semibold")
 
@@ -117,8 +117,8 @@ def render_symbol_explorer(client: Client):
             ui.label(note).classes("text-sm text-slate-400")
 
         with chart_container:
-            with ui.card().classes("w-full"):
-                ui.html(chart.html, sanitize=False).classes("w-full")
+            with ui.card().classes("bq-chart-card w-full"):
+                ui.html(chart.html, sanitize=False).classes("bq-chart-html w-full")
                 ui.run_javascript(chart.script, timeout=5.0)
 
         table.columns = build_table_columns(mode)

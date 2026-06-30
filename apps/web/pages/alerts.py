@@ -15,46 +15,47 @@ LOGGER = BQuantLogger("web_alerts_page", component="web", subcomponent="alerts_p
 def render_alerts(client: Client):
     """Render the alerts workspace with filters and acknowledgement controls."""
     del client
-    ui.label("Alerts").classes("text-4xl font-bold")
+    ui.label("Alerts").classes("bq-page-title font-bold")
     ui.label("Active and historical observability alerts with acknowledgement controls.").classes(
-        "text-sm text-slate-400"
+        "bq-page-subtitle text-sm"
     )
     ui.separator()
 
-    with ui.row().classes("w-full items-center gap-2"):
+    with ui.row().classes("bq-toolbar w-full"):
         ui.button("Back to Dashboard", on_click=lambda: ui.navigate.to("/"))
         ui.button("Operations", on_click=lambda: ui.navigate.to("/operations"))
 
-    with ui.row().classes("w-full items-end gap-3"):
-        status_select = ui.select(options=["all", "open", "acknowledged", "resolved"], value="open").classes("w-40")
-        severity_select = ui.select(options=["all", "CRITICAL", "ERROR", "WARNING", "INFO"], value="all").classes("w-40")
-        dataset_input = ui.input(label="Dataset", placeholder="e.g. intraday_ohlcv_15m_delta").classes("w-72")
-        symbol_input = ui.input(label="Symbol", placeholder="e.g. FPT").classes("w-40")
+    with ui.row().classes("bq-control-row w-full items-end"):
+        status_select = ui.select(options=["all", "open", "acknowledged", "resolved"], value="open").classes("bq-control-field")
+        severity_select = ui.select(options=["all", "CRITICAL", "ERROR", "WARNING", "INFO"], value="all").classes("bq-control-field")
+        dataset_input = ui.input(label="Dataset", placeholder="e.g. intraday_ohlcv_15m_delta").classes("bq-control-field-wide")
+        symbol_input = ui.input(label="Symbol", placeholder="e.g. FPT").classes("bq-control-field")
         ui.button("Refresh", on_click=lambda: render_table())
         ui.button("Re-evaluate Alerts", on_click=lambda: _trigger_eval())
 
     ui.separator()
 
     selected_alert = ui.select(options=[], label="Selected Alert").classes("w-full")
-    with ui.row().classes("w-full gap-2"):
+    with ui.row().classes("bq-toolbar w-full"):
         ui.button("Acknowledge", on_click=lambda: _transition("acknowledged"))
         ui.button("Resolve", on_click=lambda: _transition("resolved"))
 
-    table = ui.table(
-        columns=[
-            {"name": "alert_key", "label": "Alert Key", "field": "alert_key"},
-            {"name": "alert_type", "label": "Type", "field": "alert_type"},
-            {"name": "severity", "label": "Severity", "field": "severity"},
-            {"name": "dataset_name", "label": "Dataset", "field": "dataset_name"},
-            {"name": "symbol", "label": "Symbol", "field": "symbol"},
-            {"name": "status", "label": "Status", "field": "status"},
-            {"name": "message", "label": "Message", "field": "message"},
-            {"name": "first_event_ts", "label": "First Seen", "field": "first_event_ts"},
-            {"name": "last_event_ts", "label": "Last Seen", "field": "last_event_ts"},
-        ],
-        rows=[],
-        pagination={"rowsPerPage": 12},
-    ).classes("w-full")
+    with ui.card().classes("bq-table-card w-full"):
+        table = ui.table(
+            columns=[
+                {"name": "alert_key", "label": "Alert Key", "field": "alert_key"},
+                {"name": "alert_type", "label": "Type", "field": "alert_type"},
+                {"name": "severity", "label": "Severity", "field": "severity"},
+                {"name": "dataset_name", "label": "Dataset", "field": "dataset_name"},
+                {"name": "symbol", "label": "Symbol", "field": "symbol"},
+                {"name": "status", "label": "Status", "field": "status"},
+                {"name": "message", "label": "Message", "field": "message"},
+                {"name": "first_event_ts", "label": "First Seen", "field": "first_event_ts"},
+                {"name": "last_event_ts", "label": "Last Seen", "field": "last_event_ts"},
+            ],
+            rows=[],
+            pagination={"rowsPerPage": 12},
+        ).classes("bq-data-table")
 
     def _trigger_eval() -> None:
         """Request a fresh alert evaluation run from the operations service."""

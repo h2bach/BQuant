@@ -357,6 +357,150 @@ CREATE INDEX IF NOT EXISTS idx_agent_system_analysis_runs_date ON agent_system_a
 CREATE INDEX IF NOT EXISTS idx_agent_system_analysis_runs_status ON agent_system_analysis_runs(status);
 
 -- ============================================
+-- Agent Live Chat Tables
+-- ============================================
+CREATE TABLE IF NOT EXISTS agent_chat_messages (
+    chat_id VARCHAR PRIMARY KEY,
+    event_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    question VARCHAR NOT NULL,
+    answer_markdown VARCHAR NOT NULL,
+    answer_source VARCHAR NOT NULL,
+    model VARCHAR,
+    latency_seconds DOUBLE,
+    sections_json VARCHAR NOT NULL,
+    error_message VARCHAR
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_chat_messages_event_ts ON agent_chat_messages(event_ts);
+CREATE INDEX IF NOT EXISTS idx_agent_chat_messages_source ON agent_chat_messages(answer_source);
+
+-- ============================================
+-- Agent Knowledge Base Tables
+-- ============================================
+CREATE TABLE IF NOT EXISTS agent_knowledge_documents (
+    doc_id VARCHAR PRIMARY KEY,
+    source_path VARCHAR NOT NULL,
+    source_type VARCHAR NOT NULL,
+    title VARCHAR NOT NULL,
+    content_hash VARCHAR NOT NULL,
+    char_count INTEGER NOT NULL,
+    ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS agent_knowledge_chunks (
+    chunk_id VARCHAR PRIMARY KEY,
+    doc_id VARCHAR NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    source_path VARCHAR NOT NULL,
+    source_type VARCHAR NOT NULL,
+    title VARCHAR NOT NULL,
+    content VARCHAR NOT NULL,
+    content_hash VARCHAR NOT NULL,
+    char_count INTEGER NOT NULL,
+    ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_knowledge_chunks_doc ON agent_knowledge_chunks(doc_id);
+CREATE INDEX IF NOT EXISTS idx_agent_knowledge_chunks_source ON agent_knowledge_chunks(source_type, source_path);
+
+-- ============================================
+-- Demo Trading Tables
+-- ============================================
+CREATE TABLE IF NOT EXISTS demo_trading_accounts (
+    account_id VARCHAR PRIMARY KEY,
+    account_name VARCHAR NOT NULL,
+    currency VARCHAR NOT NULL DEFAULT 'VND',
+    initial_cash DOUBLE NOT NULL,
+    cash_balance DOUBLE NOT NULL,
+    settlement_rule VARCHAR NOT NULL DEFAULT 'T+2.5',
+    board_lot INTEGER NOT NULL DEFAULT 100,
+    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS demo_trading_orders (
+    order_id VARCHAR PRIMARY KEY,
+    account_id VARCHAR NOT NULL,
+    action VARCHAR NOT NULL,
+    symbol VARCHAR NOT NULL,
+    trade_date DATE NOT NULL,
+    trade_time TIMESTAMP NOT NULL,
+    price DOUBLE NOT NULL,
+    quantity BIGINT NOT NULL,
+    gross_amount DOUBLE NOT NULL,
+    fees DOUBLE NOT NULL DEFAULT 0,
+    taxes DOUBLE NOT NULL DEFAULT 0,
+    net_amount DOUBLE NOT NULL,
+    realized_pnl DOUBLE NOT NULL DEFAULT 0,
+    status VARCHAR NOT NULL,
+    settlement_date DATE,
+    settlement_ts TIMESTAMP,
+    source VARCHAR NOT NULL DEFAULT 'manual',
+    source_run_id VARCHAR,
+    recommendation VARCHAR,
+    rationale_json VARCHAR,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_demo_trading_orders_account_time ON demo_trading_orders(account_id, trade_time);
+CREATE INDEX IF NOT EXISTS idx_demo_trading_orders_symbol ON demo_trading_orders(symbol);
+
+CREATE TABLE IF NOT EXISTS demo_trading_lots (
+    lot_id VARCHAR PRIMARY KEY,
+    account_id VARCHAR NOT NULL,
+    symbol VARCHAR NOT NULL,
+    buy_order_id VARCHAR NOT NULL,
+    trade_date DATE NOT NULL,
+    settlement_date DATE NOT NULL,
+    settlement_ts TIMESTAMP NOT NULL,
+    quantity BIGINT NOT NULL,
+    remaining_quantity BIGINT NOT NULL,
+    avg_cost DOUBLE NOT NULL,
+    status VARCHAR NOT NULL DEFAULT 'open',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_demo_trading_lots_account_symbol ON demo_trading_lots(account_id, symbol);
+CREATE INDEX IF NOT EXISTS idx_demo_trading_lots_settlement ON demo_trading_lots(settlement_ts);
+
+CREATE TABLE IF NOT EXISTS demo_trading_daily_plans (
+    plan_id VARCHAR PRIMARY KEY,
+    account_id VARCHAR NOT NULL,
+    plan_date DATE NOT NULL,
+    source_run_id VARCHAR,
+    source_as_of_date DATE,
+    status VARCHAR NOT NULL DEFAULT 'active',
+    summary_json VARCHAR NOT NULL,
+    generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (account_id, plan_date)
+);
+
+CREATE INDEX IF NOT EXISTS idx_demo_trading_daily_plans_date ON demo_trading_daily_plans(plan_date);
+
+CREATE TABLE IF NOT EXISTS demo_trading_plan_items (
+    plan_id VARCHAR NOT NULL,
+    symbol VARCHAR NOT NULL,
+    proposed_action VARCHAR NOT NULL,
+    recommendation VARCHAR NOT NULL,
+    score DOUBLE NOT NULL DEFAULT 0,
+    confidence DOUBLE NOT NULL DEFAULT 0,
+    risk_level VARCHAR NOT NULL DEFAULT 'unknown',
+    suggested_weight DOUBLE NOT NULL DEFAULT 0,
+    current_quantity BIGINT NOT NULL DEFAULT 0,
+    sellable_quantity BIGINT NOT NULL DEFAULT 0,
+    latest_price DOUBLE,
+    current_value DOUBLE NOT NULL DEFAULT 0,
+    target_value DOUBLE NOT NULL DEFAULT 0,
+    suggested_quantity BIGINT NOT NULL DEFAULT 0,
+    rationale_json VARCHAR NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (plan_id, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS idx_demo_trading_plan_items_action ON demo_trading_plan_items(proposed_action);
+
+-- ============================================
 -- Backtest Runs Table
 -- ============================================
 CREATE TABLE IF NOT EXISTS backtest_runs (
@@ -460,6 +604,27 @@ FROM agent_system_analysis_runs
 WHERE status = 'success'
 ORDER BY created_at DESC
 LIMIT 1;
+
+-- View: Latest agent chat messages
+CREATE OR REPLACE VIEW v_latest_agent_chat_messages AS
+SELECT *
+FROM agent_chat_messages
+ORDER BY event_ts DESC
+LIMIT 100;
+
+-- View: Agent knowledge inventory
+CREATE OR REPLACE VIEW v_agent_knowledge_inventory AS
+SELECT
+    documents.source_type,
+    count(DISTINCT documents.doc_id) AS document_count,
+    count(chunks.chunk_id) AS chunk_count,
+    sum(documents.char_count) AS total_document_chars,
+    max(documents.ingested_at) AS last_ingested_at
+FROM agent_knowledge_documents documents
+LEFT JOIN agent_knowledge_chunks chunks
+  ON documents.doc_id = chunks.doc_id
+GROUP BY documents.source_type
+ORDER BY documents.source_type;
 
 -- View: Universe members as of a date
 CREATE OR REPLACE VIEW v_universe_members AS

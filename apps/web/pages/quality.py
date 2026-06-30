@@ -16,17 +16,18 @@ LOGGER = BQuantLogger("web_quality", component="web", subcomponent="quality", de
 
 def render_quality(client: Client):
     """Render the data quality page."""
-    ui.label("Data Quality").classes("text-4xl font-bold")
+    del client
+    ui.label("Data Quality").classes("bq-page-title font-bold")
     ui.separator()
     
-    with ui.row().classes("w-full"):
+    with ui.row().classes("bq-toolbar w-full"):
         ui.button("Back to Dashboard", on_click=lambda: ui.navigate.to("/"))
     
     ui.separator()
     
     # Quality checks summary
-    with ui.row().classes("w-full"):
-        with ui.card().classes("w-1/3"):
+    with ui.row().classes("bq-card-grid w-full"):
+        with ui.card().classes("bq-card"):
             ui.label("Daily OHLCV Quality").classes("text-xl font-semibold")
             daily_quality = get_daily_ohlcv_quality()
             ui.label(f"Total Rows: {daily_quality.get('total_rows', 0):,}")
@@ -34,7 +35,7 @@ def render_quality(client: Client):
             ui.label(f"Invalid OHLC: {daily_quality.get('invalid_ohlc', 0):,}")
             ui.label(f"Quality Score: {daily_quality.get('quality_score', 0):.1f}%")
         
-        with ui.card().classes("w-1/3"):
+        with ui.card().classes("bq-card"):
             ui.label("Intraday OHLCV Quality").classes("text-xl font-semibold")
             intraday_quality = get_intraday_ohlcv_quality()
             ui.label(f"Total Rows: {intraday_quality.get('total_rows', 0):,}")
@@ -42,7 +43,7 @@ def render_quality(client: Client):
             ui.label(f"Invalid OHLC: {intraday_quality.get('invalid_ohlc', 0):,}")
             ui.label(f"Quality Score: {intraday_quality.get('quality_score', 0):.1f}%")
         
-        with ui.card().classes("w-1/3"):
+        with ui.card().classes("bq-card"):
             ui.label("Data Freshness").classes("text-xl font-semibold")
             freshness = get_data_freshness()
             ui.label(f"Daily Latest: {freshness.get('daily_latest', 'N/A')}")
@@ -53,7 +54,7 @@ def render_quality(client: Client):
     ui.separator()
     
     # Quality issues table
-    with ui.card().classes("w-full"):
+    with ui.card().classes("bq-table-card w-full"):
         ui.label("Recent Quality Issues").classes("text-xl font-semibold")
         columns = [
             {"name": "table", "label": "Table", "field": "table", "sortable": True},
@@ -62,7 +63,7 @@ def render_quality(client: Client):
             {"name": "count", "label": "Count", "field": "count"},
             {"name": "last_seen", "label": "Last Seen", "field": "last_seen"},
         ]
-        issues_table = ui.table(columns=columns, rows=[])
+        issues_table = ui.table(columns=columns, rows=[]).classes("bq-data-table")
     
     # Load quality issues
     load_quality_issues(issues_table)

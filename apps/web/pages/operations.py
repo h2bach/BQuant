@@ -15,18 +15,18 @@ LOGGER = BQuantLogger("web_operations_page", component="web", subcomponent="oper
 def render_operations(client: Client):
     """Render the operations dashboard and safe manual control actions."""
     del client
-    ui.label("Operations").classes("text-4xl font-bold")
+    ui.label("Operations").classes("bq-page-title font-bold")
     ui.label("Live update health, recent jobs, checkpoints, and safe control actions.").classes(
-        "text-sm text-slate-400"
+        "bq-page-subtitle text-sm"
     )
     ui.separator()
 
-    with ui.row().classes("w-full items-center gap-2"):
+    with ui.row().classes("bq-toolbar w-full"):
         ui.button("Back to Dashboard", on_click=lambda: ui.navigate.to("/"))
         ui.button("Alerts", on_click=lambda: ui.navigate.to("/alerts"))
         ui.button("Refresh View", on_click=lambda: render_snapshot())
 
-    with ui.row().classes("w-full gap-2"):
+    with ui.row().classes("bq-toolbar w-full"):
         ui.button("Auto Update Data", on_click=lambda: _trigger("auto_update_data"))
         ui.button("Run Intraday Delta", on_click=lambda: _trigger("run_intraday_delta"))
         ui.button("Run EOD Reconcile", on_click=lambda: _trigger("run_eod_reconcile"))
@@ -39,12 +39,12 @@ def render_operations(client: Client):
 
     ui.separator()
 
-    summary_container = ui.row().classes("w-full gap-4")
-    refresh_container = ui.row().classes("w-full gap-4")
-    source_container = ui.card().classes("w-full")
-    checkpoint_container = ui.card().classes("w-full")
-    jobs_container = ui.card().classes("w-full")
-    errors_container = ui.card().classes("w-full")
+    summary_container = ui.row().classes("bq-card-grid bq-metric-grid w-full")
+    refresh_container = ui.row().classes("bq-card-grid w-full")
+    source_container = ui.card().classes("bq-table-card w-full")
+    checkpoint_container = ui.card().classes("bq-table-card w-full")
+    jobs_container = ui.card().classes("bq-table-card w-full")
+    errors_container = ui.card().classes("bq-table-card w-full")
 
     def _trigger(action_name: str) -> None:
         """Submit an allowed maintenance action through the operations service."""
@@ -93,13 +93,13 @@ def render_operations(client: Client):
                 ("Worker Session", snapshot.get("worker_health", {}).get("last_session_state", "N/A")),
             ]
             for label, value in cards:
-                with ui.card().classes("min-w-[190px] flex-1"):
+                with ui.card().classes("bq-card"):
                     ui.label(label).classes("text-sm text-slate-400")
                     ui.label(value).classes("text-lg font-semibold")
 
         with refresh_container:
             for state in snapshot["refresh_states"]:
-                with ui.card().classes("min-w-[240px] flex-1"):
+                with ui.card().classes("bq-card"):
                     ui.label(state["dataset_name"]).classes("text-sm text-slate-400")
                     ui.label(f"Version {state['refresh_version']}").classes("text-xl font-semibold")
                     ui.label(f"Last Success: {state['last_success_at'] or 'N/A'}")
@@ -117,7 +117,7 @@ def render_operations(client: Client):
                 ],
                 rows=snapshot["source_lag_summary"],
                 pagination={"rowsPerPage": 10},
-            )
+            ).classes("bq-data-table")
 
         with checkpoint_container:
             ui.label("Live Checkpoints").classes("text-xl font-semibold")
@@ -130,7 +130,7 @@ def render_operations(client: Client):
                 ],
                 rows=snapshot["checkpoints"],
                 pagination={"rowsPerPage": 15},
-            )
+            ).classes("bq-data-table")
 
         with jobs_container:
             ui.label("Recent Jobs").classes("text-xl font-semibold")
@@ -147,7 +147,7 @@ def render_operations(client: Client):
                 ],
                 rows=snapshot["recent_jobs"],
                 pagination={"rowsPerPage": 10},
-            )
+            ).classes("bq-data-table")
 
         with errors_container:
             ui.label("Recent Error Events").classes("text-xl font-semibold")
@@ -163,6 +163,6 @@ def render_operations(client: Client):
                 ],
                 rows=snapshot["recent_errors"],
                 pagination={"rowsPerPage": 10},
-            )
+            ).classes("bq-data-table")
 
     render_snapshot()

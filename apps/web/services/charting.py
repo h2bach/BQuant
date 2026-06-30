@@ -1390,8 +1390,8 @@ def _chart_container_html(element_id: str, title: str, height: int) -> str:
     <div class="bq-lwc-title">{escaped_title}</div>
     <div id="{element_id}-status" class="bq-lwc-status">Move crosshair over candles for OHLCV.</div>
   </div>
-  <div id="{element_id}-price" class="bq-lwc-pane" style="height:{price_height}px;"></div>
-  <div id="{element_id}-signal" class="bq-lwc-pane" style="height:{signal_height}px;"></div>
+  <div id="{element_id}-price" class="bq-lwc-pane bq-lwc-price-pane" style="height:{price_height}px;"></div>
+  <div id="{element_id}-signal" class="bq-lwc-pane bq-lwc-signal-pane" style="height:{signal_height}px;"></div>
   <div id="{element_id}-legend" class="bq-lwc-legend"></div>
   <div id="{element_id}-tooltip" class="bq-lwc-tooltip"></div>
 </div>

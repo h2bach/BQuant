@@ -11,6 +11,8 @@ from typing import Any
 import pandas as pd
 import yaml
 
+from agents.knowledge_base import render_knowledge_context
+from agents.llm_client import chat_completion, check_llm_available, load_llm_config, runtime_config
 from agents.orchestrator import run_agent_cycle
 from pipelines.live_update_runtime import (
     create_run_id,
@@ -146,12 +148,48 @@ def ensure_system_analysis_tables() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS agent_chat_messages (
+                chat_id VARCHAR PRIMARY KEY,
+                event_ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                question VARCHAR NOT NULL,
+                answer_markdown VARCHAR NOT NULL,
+                answer_source VARCHAR NOT NULL,
+                model VARCHAR,
+                latency_seconds DOUBLE,
+                sections_json VARCHAR NOT NULL,
+                error_message VARCHAR
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_chat_messages_event_ts
+            ON agent_chat_messages(event_ts)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_agent_chat_messages_source
+            ON agent_chat_messages(answer_source)
+            """
+        )
+        conn.execute(
+            """
             CREATE OR REPLACE VIEW v_latest_agent_system_analysis AS
             SELECT *
             FROM agent_system_analysis_runs
             WHERE status = 'success'
             ORDER BY created_at DESC
             LIMIT 1
+            """
+        )
+        conn.execute(
+            """
+            CREATE OR REPLACE VIEW v_latest_agent_chat_messages AS
+            SELECT *
+            FROM agent_chat_messages
+            ORDER BY event_ts DESC
+            LIMIT 100
             """
         )
 
@@ -554,8 +592,8 @@ def load_llm_runtime_plan() -> dict[str, Any]:
     Returns:
         `configs/llm_runtime.yaml` mapping plus a concise runtime status.
     """
-    config = _load_yaml(LLM_RUNTIME_CONFIG_PATH)
-    runtime = config.get("runtime", {})
+    config = load_llm_config(LLM_RUNTIME_CONFIG_PATH)
+    runtime = runtime_config(config)
     gpu_profile = config.get("gpu_profile", {})
     candidates = config.get("candidate_models", {})
     return {
@@ -563,10 +601,14 @@ def load_llm_runtime_plan() -> dict[str, Any]:
         "enabled": bool(runtime.get("enabled", False)),
         "backend": runtime.get("backend", "disabled"),
         "default_model": runtime.get("default_model"),
+        "endpoint": runtime.get("endpoint"),
+        "timeout_seconds": runtime.get("timeout_seconds"),
+        "fallback_to_deterministic": runtime.get("fallback_to_deterministic"),
         "recommended_concurrent_llms": gpu_profile.get("recommended_concurrent_llms", 1),
         "gpu_profile": gpu_profile,
         "candidate_models": candidates,
         "runtime": runtime,
+        "availability": check_llm_available(config),
     }
 
 
@@ -741,6 +783,340 @@ def _answer_from_sections(question: str, sections: dict[str, Any]) -> str:
         f"Data is {health['status']}; market regime is {market.get('market_regime')}; "
         f"portfolio agent status is {portfolio.get('status')}."
     )
+
+
+def build_live_analysis_sections(
+    *,
+    refresh_recommendations: bool = False,
+    trigger_type: str = "manual",
+) -> dict[str, Any]:
+    """Collect fresh deterministic context for a live LLM answer.
+
+    Args:
+        refresh_recommendations: Whether to run the recommendation agent cycle
+            before creating the context.
+        trigger_type: Manual/scheduled/recovery metadata used when refreshing
+            recommendations.
+
+    Returns:
+        Structured context sections for data health, market TA, portfolio state,
+        and local LLM runtime status.
+    """
+    return {
+        "analysis_date": now_local().date().isoformat(),
+        "agent_version": AGENT_VERSION,
+        "data_health": collect_data_health(),
+        "chart_ta": collect_chart_ta_summary(),
+        "portfolio": collect_portfolio_summary(
+            refresh_recommendations=refresh_recommendations,
+            trigger_type=trigger_type,
+        ),
+        "llm_runtime": load_llm_runtime_plan(),
+    }
+
+
+def _compact_sections_for_llm(sections: dict[str, Any]) -> dict[str, Any]:
+    """Reduce full agent sections to the fields needed by the chat model.
+
+    Args:
+        sections: Fresh output from `build_live_analysis_sections`.
+
+    Returns:
+        Compact JSON-safe context that fits a small local LLM prompt.
+    """
+    health = sections["data_health"]
+    market = sections["chart_ta"]
+    portfolio = sections["portfolio"]
+    def _compact_rows(rows: list[dict[str, Any]] | None, limit: int = 6) -> list[dict[str, Any]]:
+        """Keep only LLM-relevant fields from recommendation rows."""
+        selected: list[dict[str, Any]] = []
+        for row in (rows or [])[:limit]:
+            selected.append(
+                {
+                    "symbol": row.get("symbol"),
+                    "recommendation": row.get("recommendation"),
+                    "confidence": row.get("confidence"),
+                    "score": row.get("score"),
+                    "risk_level": row.get("risk_level"),
+                    "suggested_weight": row.get("suggested_weight"),
+                }
+            )
+        return selected
+
+    return {
+        "analysis_date": sections.get("analysis_date"),
+        "agent_version": sections.get("agent_version"),
+        "data_health": {
+            "status": health.get("status"),
+            "expected_daily_date": health.get("expected_daily_date"),
+            "daily_coverage_floor": health.get("daily", {}).get("coverage_floor_date"),
+            "daily_missing_trading_days": health.get("daily", {}).get("missing_trading_days"),
+            "market_index_coverage_floor": health.get("market_indices", {}).get("coverage_floor_date"),
+            "market_index_missing_trading_days": health.get("market_indices", {}).get("missing_trading_days"),
+            "intraday_latest_bar_time": health.get("intraday", {}).get("latest_bar_time"),
+            "intraday_stale": health.get("intraday", {}).get("stale"),
+            "quality_failure_count": health.get("quality_failure_count"),
+            "stale_manifest_rows": health.get("stale_manifest_rows"),
+            "awaiting_refresh_rows": health.get("awaiting_refresh_rows"),
+        },
+        "market_ta": {
+            "trading_date": market.get("trading_date"),
+            "market_regime": market.get("market_regime"),
+            "volatility_regime": market.get("volatility_regime"),
+            "regime_score": market.get("regime_score"),
+            "breadth": market.get("breadth"),
+            "indices": market.get("indices"),
+        },
+        "portfolio": {
+            "status": portfolio.get("status"),
+            "as_of_date": portfolio.get("as_of_date"),
+            "recommendation_counts": portfolio.get("recommendation_counts"),
+            "top_weights": _compact_rows(portfolio.get("top_weights"), limit=6),
+            "watchlist": _compact_rows(portfolio.get("watchlist"), limit=6),
+            "risk_off": _compact_rows(portfolio.get("risk_off"), limit=6),
+        },
+        "llm_runtime": {
+            "enabled": sections.get("llm_runtime", {}).get("enabled"),
+            "backend": sections.get("llm_runtime", {}).get("backend"),
+            "default_model": sections.get("llm_runtime", {}).get("default_model"),
+            "availability": sections.get("llm_runtime", {}).get("availability"),
+        },
+    }
+
+
+def _build_llm_messages(
+    question: str,
+    sections: dict[str, Any],
+    *,
+    knowledge_context: str,
+) -> list[dict[str, str]]:
+    """Build a grounded chat prompt from the live BQuant context.
+
+    Args:
+        question: User question exactly as entered in the UI/CLI.
+        sections: Fresh BQuant context sections.
+        knowledge_context: Retrieved BQuant project/system knowledge.
+
+    Returns:
+        OpenAI-compatible message list.
+    """
+    context_json = json.dumps(
+        _compact_sections_for_llm(sections),
+        ensure_ascii=False,
+        default=_json_default,
+        sort_keys=True,
+        indent=2,
+    )
+    system_prompt = (
+        "You are BQuant's live investment-analysis assistant. "
+        "Answer in Vietnamese when the user writes Vietnamese; otherwise use the user's language. "
+        "Ground every claim in the provided BQuant context. "
+        "Be clear about data freshness, market signals, portfolio implications, and uncertainty. "
+        "Do not claim guaranteed returns and do not invent data outside the context. "
+        "Keep the answer concise but useful for decision support."
+    )
+    user_prompt = (
+        "/no_think\n"
+        "User question:\n"
+        f"{question.strip()}\n\n"
+        "Fresh BQuant context JSON:\n"
+        f"```json\n{context_json}\n```\n\n"
+        "Retrieved BQuant project knowledge:\n"
+        f"{knowledge_context}\n\n"
+        "Return a practical answer with these sections when relevant: "
+        "Data status, Market/TA read, Portfolio view, Next action."
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+
+def record_agent_chat_message(
+    *,
+    chat_id: str,
+    question: str,
+    answer_markdown: str,
+    answer_source: str,
+    sections: dict[str, Any],
+    model: str | None = None,
+    latency_seconds: float | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Persist one live chat exchange for audit and debugging.
+
+    Args:
+        chat_id: Unique chat identifier.
+        question: User question.
+        answer_markdown: Rendered answer shown to the user.
+        answer_source: `llm_live`, `deterministic_fallback`, or `error`.
+        sections: Context sections used to answer the question.
+        model: LLM model name when a model generated the answer.
+        latency_seconds: Optional LLM request duration.
+        error_message: Optional runtime failure that caused fallback.
+
+    Side Effects:
+        Upserts the chat row into DuckDB.
+    """
+    ensure_system_analysis_tables()
+    with get_connection(read_only=False) as conn:
+        conn.execute(
+            """
+            INSERT INTO agent_chat_messages (
+                chat_id,
+                question,
+                answer_markdown,
+                answer_source,
+                model,
+                latency_seconds,
+                sections_json,
+                error_message
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (chat_id) DO UPDATE SET
+                question = excluded.question,
+                answer_markdown = excluded.answer_markdown,
+                answer_source = excluded.answer_source,
+                model = excluded.model,
+                latency_seconds = excluded.latency_seconds,
+                sections_json = excluded.sections_json,
+                error_message = excluded.error_message
+            """,
+            [
+                chat_id,
+                question,
+                answer_markdown,
+                answer_source,
+                model,
+                latency_seconds,
+                json.dumps(sections, ensure_ascii=True, default=_json_default, sort_keys=True),
+                error_message,
+            ],
+        )
+
+
+def load_recent_agent_chat_messages(limit: int = 20) -> list[dict[str, Any]]:
+    """Load recent live chat exchanges for the Agent page.
+
+    Args:
+        limit: Maximum number of question/answer pairs to return.
+
+    Returns:
+        Chronologically ordered chat rows. Each row contains the persisted
+        question, answer, source, model, latency, and event timestamp.
+    """
+    ensure_system_analysis_tables()
+    bounded_limit = max(1, min(int(limit), 100))
+    with get_connection(read_only=True) as conn:
+        frame = conn.execute(
+            """
+            SELECT chat_id,
+                   event_ts,
+                   question,
+                   answer_markdown,
+                   answer_source,
+                   model,
+                   latency_seconds,
+                   error_message
+            FROM agent_chat_messages
+            ORDER BY event_ts DESC
+            LIMIT ?
+            """,
+            [bounded_limit],
+        ).df()
+    if frame.empty:
+        return []
+    return frame.sort_values("event_ts").to_dict("records")
+
+
+def answer_live_system_question(question: str) -> dict[str, Any]:
+    """Answer a question with fresh BQuant context and a local live LLM.
+
+    Args:
+        question: User-entered question from the web UI or CLI.
+
+    Returns:
+        Result dictionary containing answer markdown, source label, model,
+        latency, context sections, and optional fallback/error metadata.
+    """
+    if not question.strip():
+        raise ValueError("Question is empty")
+
+    chat_id = create_run_id()
+    sections = build_live_analysis_sections(refresh_recommendations=False, trigger_type="manual")
+    config = load_llm_config(LLM_RUNTIME_CONFIG_PATH)
+    runtime = runtime_config(config)
+    fallback_answer = _answer_from_sections(question, sections)
+    answer_source = "deterministic_fallback"
+    model = str(runtime.get("default_model") or "")
+    latency_seconds: float | None = None
+    error_message: str | None = None
+    answer_markdown = fallback_answer
+
+    availability = sections.get("llm_runtime", {}).get("availability") or {}
+    if availability.get("available"):
+        try:
+            knowledge_context = render_knowledge_context(question, limit=5, max_total_chars=6000)
+            llm_response = chat_completion(
+                _build_llm_messages(question, sections, knowledge_context=knowledge_context),
+                config=config,
+            )
+            answer_markdown = llm_response.text
+            answer_source = "llm_live"
+            model = llm_response.model
+            latency_seconds = llm_response.latency_seconds
+        except Exception as exc:
+            error_message = str(exc)
+            logger = BQuantLogger(
+                "agent_live_chat",
+                component="agent",
+                subcomponent="live_chat",
+                default_channel="pipeline",
+            )
+            logger.log_error(
+                "answer_live_system_question",
+                type(exc).__name__,
+                str(exc),
+                context={"chat_id": chat_id, "model": model, "fallback_enabled": runtime.get("fallback_to_deterministic")},
+                channel="pipeline",
+            )
+            if not bool(runtime.get("fallback_to_deterministic", True)):
+                answer_source = "error"
+                answer_markdown = f"LLM runtime failed and fallback is disabled: {exc}"
+                record_agent_chat_message(
+                    chat_id=chat_id,
+                    question=question,
+                    answer_markdown=answer_markdown,
+                    answer_source=answer_source,
+                    sections=sections,
+                    model=model,
+                    latency_seconds=latency_seconds,
+                    error_message=error_message,
+                )
+                raise
+    else:
+        error_message = str(availability.get("error") or "LLM runtime unavailable")
+
+    record_agent_chat_message(
+        chat_id=chat_id,
+        question=question,
+        answer_markdown=answer_markdown,
+        answer_source=answer_source,
+        sections=sections,
+        model=model or None,
+        latency_seconds=latency_seconds,
+        error_message=error_message,
+    )
+    return {
+        "chat_id": chat_id,
+        "answer_markdown": answer_markdown,
+        "answer_source": answer_source,
+        "model": model or None,
+        "latency_seconds": latency_seconds,
+        "sections": sections,
+        "error_message": error_message,
+        "availability": availability,
+    }
 
 
 def record_system_analysis_run(

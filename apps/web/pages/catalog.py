@@ -16,19 +16,20 @@ LOGGER = BQuantLogger("web_catalog", component="web", subcomponent="catalog", de
 
 def render_catalog(client: Client):
     """Render the data catalog page."""
-    ui.label("Data Catalog").classes("text-4xl font-bold")
+    del client
+    ui.label("Data Catalog").classes("bq-page-title font-bold")
     ui.separator()
     
-    with ui.row().classes("w-full"):
+    with ui.row().classes("bq-toolbar w-full"):
         ui.button("Back to Dashboard", on_click=lambda: ui.navigate.to("/"))
     
     ui.separator()
     
     datasets = get_dataset_catalog()
     
-    with ui.grid(columns=2).classes("w-full"):
+    with ui.row().classes("bq-card-grid w-full"):
         for dataset in datasets:
-            with ui.card():
+            with ui.card().classes("bq-card"):
                 ui.label(dataset["name"]).classes("text-xl font-semibold")
                 ui.label(f"Description: {dataset['description']}")
                 ui.label(f"Table: {dataset['table']}")

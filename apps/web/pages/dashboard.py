@@ -24,14 +24,14 @@ def render_dashboard(client: Client):
         Lightweight Charts JavaScript in the browser.
     """
     del client
-    ui.label("BQuant Platform Dashboard").classes("text-4xl font-bold")
+    ui.label("BQuant Platform Dashboard").classes("bq-page-title font-bold")
     ui.label("Daily market view for VNIndex and VN30 with core momentum and breadth indicators.").classes(
-        "text-sm text-slate-400"
+        "bq-page-subtitle text-sm"
     )
     ui.separator()
 
-    with ui.row().classes("w-full items-center justify-between gap-4"):
-        with ui.row().classes("gap-2"):
+    with ui.row().classes("bq-header-row w-full"):
+        with ui.row().classes("bq-toolbar"):
             ui.button("Symbol Explorer", on_click=lambda: ui.navigate.to("/symbol"))
             ui.button("Data Catalog", on_click=lambda: ui.navigate.to("/catalog"))
             ui.button("Manifest", on_click=lambda: ui.navigate.to("/manifest"))
@@ -40,12 +40,13 @@ def render_dashboard(client: Client):
             ui.button("Operations", on_click=lambda: ui.navigate.to("/operations"))
             ui.button("Alerts", on_click=lambda: ui.navigate.to("/alerts"))
             ui.button("Agents", on_click=lambda: ui.navigate.to("/agents"))
-        with ui.row().classes("items-center gap-3"):
+            ui.button("Demo Trading", on_click=lambda: ui.navigate.to("/demo_trading"))
+        with ui.row().classes("bq-control-row"):
             ui.label("Range").classes("text-sm text-slate-400")
             period_select = ui.select(
                 options=OVERVIEW_PERIOD_OPTIONS,
                 value="10Y",
-            ).classes("w-32")
+            ).classes("bq-control-field")
 
     ui.separator()
     ui.label("Market Overview").classes("text-2xl font-semibold")
@@ -100,15 +101,15 @@ def render_dashboard(client: Client):
                 "VNIndex and VN30 now render with TradingView Lightweight Charts. Price, volume, and signal panes use separate scales so candle structure stays readable."
             ).classes("text-sm text-slate-400")
             for overview_title, chart_title, metrics, chart, note in sections:
-                with ui.card().classes("w-full"):
+                with ui.card().classes("bq-chart-card w-full"):
                     ui.label(overview_title).classes("text-xl font-semibold")
-                    with ui.row().classes("w-full flex-wrap gap-3 mb-2"):
+                    with ui.row().classes("bq-card-grid bq-metric-grid w-full mb-2"):
                         for metric in metrics:
-                            with ui.column().classes("min-w-[170px] flex-1 rounded border border-slate-700 p-3"):
+                            with ui.column().classes("bq-card rounded border border-slate-700 p-3"):
                                 ui.label(metric["label"]).classes("text-xs text-slate-400")
                                 ui.label(metric["value"]).classes("text-base font-semibold")
                     ui.label(chart_title).classes("text-lg font-semibold")
-                    ui.html(chart.html, sanitize=False).classes("w-full")
+                    ui.html(chart.html, sanitize=False).classes("bq-chart-html w-full")
                     ui.run_javascript(chart.script, timeout=5.0)
                     ui.label(note).classes("text-xs text-slate-400")
 
@@ -117,21 +118,21 @@ def render_dashboard(client: Client):
 
     ui.separator()
     ui.label("Operational Snapshot").classes("text-2xl font-semibold")
-    with ui.row().classes("w-full items-stretch gap-4"):
-        with ui.card().classes("w-[32%]"):
+    with ui.row().classes("bq-card-grid w-full"):
+        with ui.card().classes("bq-card"):
             ui.label("Dataset Overview").classes("text-xl font-semibold")
             dataset_stats = get_dataset_stats()
             for dataset, count in dataset_stats.items():
                 ui.label(f"{dataset}: {count:,} rows")
 
-        with ui.card().classes("w-[32%]"):
+        with ui.card().classes("bq-card"):
             ui.label("Universe Status").classes("text-xl font-semibold")
             universe_info = get_universe_info()
             ui.label(f"Universe: {universe_info.get('universe_name', 'N/A')}")
             ui.label(f"Symbols: {universe_info.get('symbol_count', 0)}")
             ui.label(f"Effective Date: {universe_info.get('effective_date', 'N/A')}")
 
-        with ui.card().classes("w-[32%]"):
+        with ui.card().classes("bq-card"):
             ui.label("Pipeline Status").classes("text-xl font-semibold")
             pipeline_info = get_pipeline_status()
             ui.label(f"Last Run: {pipeline_info.get('last_run', 'N/A')}")
