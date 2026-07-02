@@ -11,6 +11,11 @@ market_regime as (
 quality as (
     select *
     from {{ ref('mart_symbol_data_quality') }}
+),
+
+ta_signals as (
+    select *
+    from {{ ref('mart_symbol_ta_signals_daily') }}
 )
 
 select
@@ -32,6 +37,29 @@ select
     symbol_features.traded_value_cross_section_percentile,
     symbol_features.trend_state,
     symbol_features.liquidity_state,
+    ta_signals.ta_trend_score,
+    ta_signals.ta_momentum_score,
+    ta_signals.ta_volatility_score,
+    ta_signals.ta_liquidity_score,
+    ta_signals.ta_relative_strength_score,
+    ta_signals.ta_composite_score,
+    ta_signals.ta_action_bias,
+    ta_signals.ta_risk_flag,
+    ta_signals.rsi_14,
+    ta_signals.macd,
+    ta_signals.macd_signal,
+    ta_signals.macd_histogram,
+    ta_signals.adx_14,
+    ta_signals.plus_di_14,
+    ta_signals.minus_di_14,
+    ta_signals.atr_pct_14,
+    ta_signals.bollinger_band_width,
+    ta_signals.volume_zscore_20,
+    ta_signals.mfi_14,
+    ta_signals.relative_strength_vs_vn30_20d,
+    ta_signals.relative_strength_vs_vnindex_20d,
+    ta_signals.beta_vs_vn30_60d,
+    ta_signals.correlation_vs_vn30_60d,
     market_regime.market_regime,
     market_regime.volatility_regime,
     market_regime.regime_score,
@@ -58,3 +86,6 @@ left join market_regime
     on symbol_features.trading_date = market_regime.trading_date
 left join quality
     on symbol_features.symbol = quality.symbol
+left join ta_signals
+    on symbol_features.symbol = ta_signals.symbol
+   and symbol_features.trading_date = ta_signals.trading_date

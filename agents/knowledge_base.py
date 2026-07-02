@@ -31,6 +31,8 @@ INCLUDE_PATTERNS = [
     "transformations/dbt/models/**/*.sql",
     "transformations/dbt/models/**/*.yml",
     "agents/**/*.py",
+    "agents/llm_playbooks/**/*.md",
+    "agents/llm_playbooks/**/*.yaml",
     "apps/web/**/*.py",
     "pipelines/**/*.py",
     "data_ingestion/**/*.py",
@@ -177,12 +179,18 @@ def _source_type(path: Path) -> str:
     parts = set(path.parts)
     if "architectures" in parts:
         return "architecture"
-    if "skills" in parts:
-        return "skill"
     if "plans" in parts:
         return "plan"
     if "agent_build_reports" in parts:
         return "build_report"
+    if "llm_playbooks" in parts and "skills" in parts:
+        return "llm_skill"
+    if "llm_playbooks" in parts and "references" in parts:
+        return "llm_reference"
+    if "llm_playbooks" in parts:
+        return "llm_plan"
+    if "skills" in parts:
+        return "skill"
     if "configs" in parts:
         return "config"
     if "transformations" in parts:
@@ -417,6 +425,8 @@ def retrieve_knowledge_chunks(
             continue
         path_boost = 1.5 if any(term in source_path.lower() for term in query_terms) else 0.0
         type_boost = 1.0 if source_type in {"architecture", "project_doc", "warehouse_schema", "dbt"} else 0.0
+        if source_type in {"llm_plan", "llm_skill", "llm_reference"}:
+            type_boost += 1.5
         score = float(len(overlap) * 2.0 + path_boost + type_boost)
         scored.append(
             KnowledgeChunk(

@@ -306,6 +306,30 @@ def _coerce_date(value: Any, default: date) -> date:
         return default
 
 
+def _optional_date(value: Any) -> date | None:
+    """Convert nullable user/control input into an optional date.
+
+    Args:
+        value: Date-like scalar or blank value.
+
+    Returns:
+        Parsed date, or `None` when no usable date is supplied.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return pd.Timestamp(text).date()
+    except (TypeError, ValueError):
+        return None
+
+
 def _to_vnd_price(value: Any) -> float:
     """Normalize Vietnamese stock quotes to VND per share.
 
@@ -354,6 +378,40 @@ def _latest_price_map(as_of_date: date | None = None) -> dict[str, dict[str, Any
         str(symbol): {"trading_date": pd.Timestamp(trading_date).date(), "close": _to_vnd_price(close)}
         for symbol, trading_date, close in rows
     }
+
+
+def _latest_daily_date(symbols: list[str] | None = None) -> date | None:
+    """Resolve the latest daily OHLCV date available for a symbol set.
+
+    Args:
+        symbols: Optional list of tickers. When provided, the function returns
+            the minimum latest date across those symbols so portfolio analysis
+            uses a common mark-to-market date.
+
+    Returns:
+        Latest common trading date, or `None` if no daily data exists.
+    """
+    params: list[Any] = []
+    symbol_clause = ""
+    if symbols:
+        placeholders = ", ".join(["?"] * len(symbols))
+        symbol_clause = f"WHERE symbol IN ({placeholders})"
+        params.extend(symbols)
+    with get_connection(read_only=True) as conn:
+        row = conn.execute(
+            f"""
+            WITH per_symbol AS (
+                SELECT symbol, max(trading_date) AS latest_date
+                FROM daily_ohlcv_base
+                {symbol_clause}
+                GROUP BY symbol
+            )
+            SELECT min(latest_date)
+            FROM per_symbol
+            """,
+            params,
+        ).fetchone()
+    return pd.Timestamp(row[0]).date() if row and row[0] is not None else None
 
 
 def _load_account() -> dict[str, Any]:
@@ -430,6 +488,8 @@ def _load_positions(moment: datetime | None = None) -> list[dict[str, Any]]:
                 "sellable_quantity": 0,
                 "avg_cost": 0.0,
                 "cost_basis": 0.0,
+                "first_trade_date": "",
+                "last_trade_date": "",
                 "first_settlement_ts": "",
                 "last_settlement_ts": "",
             },
@@ -437,6 +497,17 @@ def _load_positions(moment: datetime | None = None) -> list[dict[str, Any]]:
         position["quantity"] += quantity
         position[bucket] += quantity
         position["cost_basis"] += quantity * avg_cost
+        trade_date_text = trade_date.isoformat()
+        position["first_trade_date"] = (
+            trade_date_text
+            if not position["first_trade_date"] or trade_date_text < position["first_trade_date"]
+            else position["first_trade_date"]
+        )
+        position["last_trade_date"] = (
+            trade_date_text
+            if not position["last_trade_date"] or trade_date_text > position["last_trade_date"]
+            else position["last_trade_date"]
+        )
         position["first_settlement_ts"] = (
             str(settlement_ts)
             if not position["first_settlement_ts"] or str(settlement_ts) < position["first_settlement_ts"]
@@ -1199,6 +1270,26 @@ def _context_rows(symbols: list[str], as_of_date: date) -> dict[str, dict[str, A
                     market_regime,
                     volatility_regime,
                     regime_score,
+                    ta_trend_score,
+                    ta_momentum_score,
+                    ta_volatility_score,
+                    ta_liquidity_score,
+                    ta_relative_strength_score,
+                    ta_composite_score,
+                    ta_action_bias,
+                    ta_risk_flag,
+                    rsi_14,
+                    macd,
+                    macd_signal,
+                    macd_histogram,
+                    adx_14,
+                    atr_pct_14,
+                    bollinger_band_width,
+                    volume_zscore_20,
+                    mfi_14,
+                    relative_strength_vs_vn30_20d,
+                    relative_strength_vs_vnindex_20d,
+                    beta_vs_vn30_60d,
                     data_quality_status,
                     stale_days,
                     row_number() OVER (PARTITION BY symbol ORDER BY trading_date DESC) AS rn
@@ -1213,6 +1304,287 @@ def _context_rows(symbols: list[str], as_of_date: date) -> dict[str, dict[str, A
             [*symbols, as_of_date],
         ).df()
     return {str(row["symbol"]): row.to_dict() for _, row in rows.iterrows()}
+
+
+def _signal_verdict(label: str, evidence: str, implication: str, verdict: str, icon: str = "analytics") -> dict[str, str]:
+    """Build one display-ready technical signal verdict.
+
+    Args:
+        label: Indicator or signal family name.
+        evidence: Numeric or categorical evidence used by the agent.
+        implication: Plain-language interpretation for portfolio action.
+        verdict: `bullish`, `bearish`, `neutral`, `risk`, or `blocked`.
+        icon: Material icon name rendered by the UI chip.
+
+    Returns:
+        Normalized dictionary consumed by Demo Trading UI components.
+    """
+    return {"label": label, "evidence": evidence, "implication": implication, "verdict": verdict, "icon": icon}
+
+
+def _indicator_signal_verdicts(
+    *,
+    ctx: dict[str, Any],
+    qaoa: dict[str, Any] | None = None,
+    recommendation: str,
+    action: str,
+    score: float,
+    risk_level: str,
+    sellable_quantity: int = 0,
+) -> list[dict[str, str]]:
+    """Translate raw TA/context fields into explainable decision signals.
+
+    Args:
+        ctx: Latest `mart_agent_context_daily` row for the symbol.
+        qaoa: Optional latest QAOA/optimizer output for the symbol.
+        recommendation: Deterministic agent recommendation bucket.
+        action: Current demo-trading action bucket.
+        score: Agent score used for rank/threshold decisions.
+        risk_level: Agent risk bucket.
+        sellable_quantity: Current T+2.5 sellable quantity for settlement
+            interpretation.
+
+    Returns:
+        Ordered list of indicator verdicts. Each verdict states what the
+        indicator suggests and how it influences BUY/HOLD/SELL/TRIM/WATCH.
+    """
+    trend_state = str(ctx.get("trend_state") or "unknown")
+    liquidity_state = str(ctx.get("liquidity_state") or "unknown")
+    market_regime = str(ctx.get("market_regime") or "unknown")
+    data_quality = str(ctx.get("data_quality_status") or "unknown")
+    ta_bias = str(ctx.get("ta_action_bias") or "neutral")
+    ta_risk = str(ctx.get("ta_risk_flag") or risk_level or "unknown")
+    rsi = _safe_float(ctx.get("rsi_14"))
+    macd_hist = _safe_float(ctx.get("macd_histogram"))
+    adx = _safe_float(ctx.get("adx_14"))
+    mfi = _safe_float(ctx.get("mfi_14"))
+    atr_pct = _safe_float(ctx.get("atr_pct_14"))
+    rs20 = _safe_float(ctx.get("relative_strength_20d"))
+    ret5 = _safe_float(ctx.get("return_5d"))
+    ret20 = _safe_float(ctx.get("return_20d"))
+    drawdown = _safe_float(ctx.get("drawdown_from_peak"))
+    traded_pct = _safe_float(ctx.get("traded_value_cross_section_percentile"))
+    volume_z = _safe_float(ctx.get("volume_zscore_20"))
+    composite = _safe_float(ctx.get("ta_composite_score"))
+    qaoa_row = qaoa or {}
+    qaoa_available = bool(qaoa_row)
+    qaoa_selected = bool(qaoa_row.get("selected")) if qaoa_available else False
+    qaoa_weight = _safe_float(qaoa_row.get("proposed_weight")) if qaoa_available else 0.0
+    qaoa_alpha = _safe_float(qaoa_row.get("expected_alpha")) if qaoa_available else 0.0
+    qaoa_backend = str(qaoa_row.get("backend") or "unavailable")
+    qaoa_fallback = bool(qaoa_row.get("fallback_used")) if qaoa_available else False
+    context_prefix = (
+        f"Context tổng hợp: action={action}, recommendation={recommendation}, score={score:.3f}, "
+        f"market={market_regime}, risk={risk_level}, liquidity={liquidity_state}, "
+        f"QAOA_selected={qaoa_selected}, QAOA_weight={qaoa_weight:.2%}, sellable={sellable_quantity:,}."
+    )
+
+    signals: list[dict[str, str]] = []
+
+    if action in {"BUY", "HOLD"}:
+        synthesis_verdict = "bullish" if qaoa_selected or ta_bias == "bullish" or trend_state == "uptrend" else "neutral"
+    elif action in {"SELL", "TRIM"}:
+        synthesis_verdict = "risk" if sellable_quantity <= 0 else "bearish"
+    else:
+        synthesis_verdict = "neutral"
+    signals.append(
+        _signal_verdict(
+            "Decision synthesis",
+            f"action={action}, agent={recommendation}, score={score:.3f}, QAOA={qaoa_selected}",
+            f"{context_prefix} Quyết định cuối không lấy từ một chỉ báo đơn lẻ; nó là kết quả phối hợp TA, optimizer, risk, liquidity, market regime và constraint giao dịch.",
+            synthesis_verdict,
+            "psychology_alt",
+        )
+    )
+
+    trend_verdict = "bullish" if trend_state == "uptrend" else "bearish" if trend_state == "downtrend" else "neutral"
+    signals.append(
+        _signal_verdict(
+            "Trend / MA structure",
+            f"trend={trend_state}, ADX14={adx:.2f}, ta_trend={_safe_float(ctx.get('ta_trend_score')):.2f}",
+            f"{context_prefix} Trend đang đóng vai trò {'ủng hộ giữ/tăng vị thế' if trend_verdict == 'bullish' else 'cản trở tăng vị thế' if trend_verdict == 'bearish' else 'trung tính'} trong quyết định; ADX chỉ được đọc cùng QAOA, risk và liquidity.",
+            trend_verdict,
+            "show_chart",
+        )
+    )
+
+    if rsi >= 70:
+        rsi_verdict = "risk"
+        rsi_text = "RSI quá mua: vẫn có momentum nhưng không nên mua đuổi nếu thiếu xác nhận khác."
+    elif rsi <= 30:
+        rsi_verdict = "bearish"
+        rsi_text = "RSI quá bán: có thể là hồi kỹ thuật, nhưng hiện tại là tín hiệu suy yếu."
+    elif rsi >= 55:
+        rsi_verdict = "bullish"
+        rsi_text = "RSI tích cực: momentum đang nghiêng về phía nắm giữ/mua có kiểm soát."
+    else:
+        rsi_verdict = "neutral"
+        rsi_text = "RSI trung tính: không đủ để tự tạo quyết định mua/bán."
+    signals.append(_signal_verdict("RSI 14", f"RSI14={rsi:.2f}", rsi_text, rsi_verdict))
+    signals[-1]["implication"] = f"{context_prefix} {signals[-1]['implication']} RSI chỉ điều chỉnh mức tự tin/mua đuổi; quyết định vẫn phụ thuộc trend, QAOA và rủi ro tổng hợp."
+    signals[-1]["icon"] = "speed"
+
+    macd_verdict = "bullish" if macd_hist > 0 else "bearish" if macd_hist < 0 else "neutral"
+    signals.append(
+        _signal_verdict(
+            "MACD histogram",
+            f"MACD hist={macd_hist:.4f}",
+            f"{context_prefix} MACD dùng để xác nhận/giảm xác suất momentum; nếu trái chiều với QAOA hoặc trend thì hệ thống ưu tiên WATCH/HOLD thay vì tăng vị thế mạnh.",
+            macd_verdict,
+            "stacked_line_chart",
+        )
+    )
+
+    rs_verdict = "bullish" if rs20 > 0.02 else "bearish" if rs20 < -0.02 else "neutral"
+    signals.append(
+        _signal_verdict(
+            "Relative strength 20D",
+            f"RS20={rs20:+.2%}, return5D={ret5:+.2%}, return20D={ret20:+.2%}",
+            f"{context_prefix} Relative strength cho biết mã có đáng được ưu tiên hơn VN30 hay không; RS yếu sẽ kéo giảm sizing dù các chỉ báo riêng lẻ có thể tích cực.",
+            rs_verdict,
+            "compare_arrows",
+        )
+    )
+
+    liquidity_verdict = "bullish" if liquidity_state == "high_liquidity" else "neutral" if liquidity_state == "normal_liquidity" else "risk"
+    signals.append(
+        _signal_verdict(
+            "Liquidity / volume",
+            f"liquidity={liquidity_state}, traded_pct={traded_pct:.2f}, volume_z={volume_z:+.2f}",
+            f"{context_prefix} Liquidity ảnh hưởng trực tiếp đến khả năng thực thi và kích thước lệnh; thanh khoản thấp có thể biến BUY thành WATCH dù TA tốt.",
+            liquidity_verdict,
+            "waterfall_chart",
+        )
+    )
+
+    risk_verdict = "risk" if risk_level == "high" or ta_risk == "high" or atr_pct > 0.04 or drawdown < -0.15 else "neutral"
+    signals.append(
+        _signal_verdict(
+            "Risk / volatility",
+            f"risk={risk_level}, ta_risk={ta_risk}, ATR%={atr_pct:.2%}, drawdown={drawdown:+.2%}",
+            f"{context_prefix} Risk là bộ phanh của quyết định: ATR/drawdown/risk flag cao sẽ ép giảm target hoặc TRIM nếu tín hiệu lợi nhuận không đủ bù rủi ro.",
+            risk_verdict,
+            "shield",
+        )
+    )
+
+    ta_verdict = "bullish" if ta_bias == "bullish" else "bearish" if ta_bias == "bearish" else "neutral"
+    signals.append(
+        _signal_verdict(
+            "TA composite",
+            f"bias={ta_bias}, composite={composite:.3f}, agent_score={score:.3f}",
+            f"{context_prefix} Composite là điểm hợp nhất của nhiều nhóm TA; nó không tự quyết định lệnh, mà được đối chiếu với QAOA, market regime và trạng thái portfolio.",
+            ta_verdict,
+            "insights",
+        )
+    )
+
+    if qaoa_selected and qaoa_weight > 0:
+        qaoa_verdict = "bullish"
+        qaoa_text = f"{context_prefix} QAOA đưa mã vào basket tối ưu nên nó ủng hộ BUY/HOLD, nhưng vẫn bị giới hạn bởi cash, risk, liquidity và T+2.5."
+    elif qaoa_available:
+        qaoa_verdict = "neutral"
+        qaoa_text = f"{context_prefix} QAOA không chọn mã vào basket, vì vậy hệ thống không tăng tỷ trọng chỉ dựa vào TA; trạng thái hợp lý hơn là WATCH/HOLD nếu đang có vị thế."
+    else:
+        qaoa_verdict = "neutral"
+        qaoa_text = f"{context_prefix} Chưa có optimizer signal cho ngày này; quyết định dựa chủ yếu vào deterministic TA/risk context."
+    fallback_text = ", fallback" if qaoa_fallback else ""
+    signals.append(
+        _signal_verdict(
+            "QAOA optimizer",
+            f"selected={qaoa_selected}, weight={qaoa_weight:.2%}, alpha={qaoa_alpha:+.4f}, backend={qaoa_backend}{fallback_text}",
+            qaoa_text,
+            qaoa_verdict,
+            "hub",
+        )
+    )
+
+    market_verdict = "bullish" if market_regime == "bullish" else "bearish" if market_regime == "bearish" else "neutral"
+    signals.append(
+        _signal_verdict(
+            "Market regime",
+            f"market={market_regime}, data_quality={data_quality}",
+            f"{context_prefix} Market regime là bộ lọc nền; khi neutral/risk-off, hệ thống ưu tiên sizing thận trọng kể cả khi mã riêng lẻ có tín hiệu tốt.",
+            market_verdict if data_quality == "pass" else "blocked",
+            "public",
+        )
+    )
+
+    if action in {"SELL", "TRIM", "HOLD_LOCKED"}:
+        settlement_verdict = "blocked" if sellable_quantity <= 0 else "neutral"
+        settlement_text = (
+            "Chưa được bán theo T+2.5, nên chỉ HOLD/WATCH dù tín hiệu yếu."
+            if sellable_quantity <= 0
+            else "Đã có khối lượng sellable; SELL/TRIM có thể thực thi nếu tín hiệu xấu."
+        )
+        signals.append(
+            _signal_verdict(
+                "T+2.5 settlement",
+                f"sellable={sellable_quantity:,}",
+                f"{context_prefix} {settlement_text}",
+                settlement_verdict,
+                "lock_clock",
+            )
+        )
+
+    return signals
+
+
+def _qaoa_rows(symbols: list[str], as_of_date: date) -> dict[str, dict[str, Any]]:
+    """Load latest QAOA optimizer verdicts for selected symbols.
+
+    Args:
+        symbols: Symbols to map to optimizer rows.
+        as_of_date: Latest allowed optimizer date.
+
+    Returns:
+        Mapping keyed by symbol. Rows include selected flag, proposed weight,
+        expected alpha, candidate rank, backend, and fallback metadata.
+    """
+    if not symbols:
+        return {}
+    placeholders = ", ".join(["?"] * len(symbols))
+    with get_connection(read_only=True) as conn:
+        frame = conn.execute(
+            f"""
+            WITH latest_run AS (
+                SELECT run_id, as_of_date, backend, fallback_used, energy, created_at
+                FROM qaoa_optimizer_runs
+                WHERE status = 'success'
+                  AND as_of_date <= ?
+                ORDER BY as_of_date DESC, created_at DESC
+                LIMIT 1
+            )
+            SELECT
+                assets.symbol,
+                latest_run.run_id,
+                latest_run.as_of_date,
+                latest_run.backend,
+                latest_run.fallback_used,
+                latest_run.energy,
+                assets.selected,
+                assets.proposed_weight,
+                assets.bit_value,
+                assets.energy_contribution,
+                assets.rank,
+                candidates.expected_alpha,
+                candidates.ta_composite_score,
+                candidates.ta_risk_flag,
+                candidates.liquidity_percentile,
+                candidates.volatility_20d
+            FROM latest_run
+            INNER JOIN qaoa_optimizer_solution_assets assets
+              ON assets.run_id = latest_run.run_id
+            LEFT JOIN qaoa_optimizer_candidates candidates
+              ON candidates.run_id = assets.run_id
+             AND candidates.symbol = assets.symbol
+            WHERE assets.symbol IN ({placeholders})
+            """,
+            [as_of_date, *symbols],
+        ).df()
+    if frame.empty:
+        return {}
+    return {str(row["symbol"]): row.to_dict() for _, row in frame.iterrows()}
 
 
 def _recommendation_rows(symbols: list[str], as_of_date: date) -> dict[str, dict[str, Any]]:
@@ -1324,27 +1696,28 @@ def load_demo_portfolio_analysis(
     as_of_date: date | str | None = None,
     positions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Calculate portfolio PnL and current agent analysis for demo holdings.
+    """Calculate ledger-based PnL and current agent analysis for demo holdings.
 
     Args:
-        entry_date: Buy-point date. Defaults to `2026-06-15`, the first trading
-            date used by the deeper walk-forward smoke test.
-        as_of_date: Latest data date. Defaults to `2026-06-30`, matching the
-            current local dataset ceiling.
+        entry_date: Optional historical signal-reference date. It is no longer
+            used as cost basis; ledger lots supply `avg_cost` and `cost_basis`.
+        as_of_date: Optional mark-to-market data date. Defaults to the latest
+            common daily date for open positions.
         positions: Optional open positions from `_load_positions`. When omitted,
             the function loads current demo positions itself.
 
     Returns:
-        Summary and per-symbol analysis rows. Values are gross unless the field
-        name explicitly says `net`.
+        Summary and per-symbol analysis rows. PnL uses ledger cost basis and
+        subtracts estimated sell costs in `net_if_closed_*`.
     """
-    resolved_entry_date = _coerce_date(entry_date, DEFAULT_ANALYSIS_ENTRY_DATE)
-    resolved_as_of_date = _coerce_date(as_of_date, DEFAULT_ANALYSIS_AS_OF_DATE)
     position_rows = positions if positions is not None else _load_positions()
     symbols = [str(row["symbol"]) for row in position_rows]
+    resolved_entry_date = _optional_date(entry_date) or DEFAULT_ANALYSIS_ENTRY_DATE
+    resolved_as_of_date = _optional_date(as_of_date) or _latest_daily_date(symbols) or DEFAULT_ANALYSIS_AS_OF_DATE
     price_points = _historical_price_points(symbols, resolved_entry_date, resolved_as_of_date)
     contexts = _context_rows(symbols, resolved_as_of_date)
     recommendations = _recommendation_rows(symbols, resolved_as_of_date)
+    qaoa_signals = _qaoa_rows(symbols, resolved_as_of_date)
 
     rows: list[dict[str, Any]] = []
     totals = {
@@ -1359,16 +1732,17 @@ def load_demo_portfolio_analysis(
         symbol = str(position["symbol"])
         quantity = int(position.get("quantity", 0) or 0)
         price_meta = price_points.get(symbol, {})
-        entry_price = _safe_float(price_meta.get("entry_price"))
+        historical_entry_price = _safe_float(price_meta.get("entry_price"))
         current_price = _safe_float(price_meta.get("current_price"))
-        entry_value = quantity * entry_price
+        entry_price = _safe_float(position.get("avg_cost"))
+        entry_value = _safe_float(position.get("cost_basis"))
         current_value = quantity * current_price
         gross_pnl = current_value - entry_value
         gross_return = gross_pnl / entry_value if entry_value > 0 else 0.0
-        buy_fee = entry_value * BUY_FEE_RATE
+        buy_fee = 0.0
         sell_fee_tax = current_value * (SELL_FEE_RATE + SELL_TAX_RATE)
-        net_if_closed_pnl = current_value - sell_fee_tax - entry_value - buy_fee
-        net_if_closed_return = net_if_closed_pnl / (entry_value + buy_fee) if entry_value > 0 else 0.0
+        net_if_closed_pnl = current_value - sell_fee_tax - entry_value
+        net_if_closed_return = net_if_closed_pnl / entry_value if entry_value > 0 else 0.0
 
         rec = recommendations.get(symbol, {})
         ctx = contexts.get(symbol, {})
@@ -1407,6 +1781,15 @@ def load_demo_portfolio_analysis(
             component_scores=component_scores,
             action=action,
         )
+        indicator_signals = _indicator_signal_verdicts(
+            ctx=ctx,
+            qaoa=qaoa_signals.get(symbol),
+            recommendation=recommendation,
+            action=action,
+            score=score,
+            risk_level=risk_level,
+            sellable_quantity=int(position.get("sellable_quantity", 0) or 0),
+        )
         rows.append(
             {
                 "symbol": symbol,
@@ -1415,8 +1798,12 @@ def load_demo_portfolio_analysis(
                 "t1_quantity": int(position.get("t1_quantity", 0) or 0),
                 "t2_quantity": int(position.get("t2_quantity", 0) or 0),
                 "sellable_quantity": int(position.get("sellable_quantity", 0) or 0),
-                "entry_date": str(price_meta.get("entry_date") or resolved_entry_date),
+                "entry_date": str(position.get("first_trade_date") or ""),
                 "entry_price": entry_price,
+                "avg_cost": entry_price,
+                "cost_basis": entry_value,
+                "historical_entry_date": str(price_meta.get("entry_date") or resolved_entry_date),
+                "historical_entry_price": historical_entry_price,
                 "current_date": str(price_meta.get("current_date") or resolved_as_of_date),
                 "current_price": current_price,
                 "entry_value": entry_value,
@@ -1445,6 +1832,8 @@ def load_demo_portfolio_analysis(
                 "traded_value_percentile": _safe_float(ctx.get("traded_value_cross_section_percentile")),
                 "component_scores": component_scores,
                 "reasons": reasons,
+                "indicator_signals": indicator_signals,
+                "qaoa_signal": qaoa_signals.get(symbol) or {},
             }
         )
         totals["entry_value"] += entry_value
@@ -1457,12 +1846,11 @@ def load_demo_portfolio_analysis(
     rows = sorted(rows, key=lambda item: item["gross_pnl"], reverse=True)
     summary = {
         **totals,
-        "entry_date": resolved_entry_date.isoformat(),
+        "entry_date": min((str(row.get("entry_date")) for row in rows if row.get("entry_date")), default=""),
+        "signal_reference_date": resolved_entry_date.isoformat(),
         "as_of_date": resolved_as_of_date.isoformat(),
         "gross_return": totals["gross_pnl"] / totals["entry_value"] if totals["entry_value"] > 0 else 0.0,
-        "net_if_closed_return": totals["net_if_closed_pnl"] / (totals["entry_value"] + totals["buy_fees"])
-        if totals["entry_value"] > 0
-        else 0.0,
+        "net_if_closed_return": totals["net_if_closed_pnl"] / totals["entry_value"] if totals["entry_value"] > 0 else 0.0,
         "winners": sum(1 for row in rows if row["gross_pnl"] > 0),
         "losers": sum(1 for row in rows if row["gross_pnl"] < 0),
         "neutral": sum(1 for row in rows if row["gross_pnl"] == 0),
@@ -1529,8 +1917,7 @@ def load_demo_trading_snapshot(
     account = _load_account()
     plan = _current_plan_row()
     positions = _load_positions()
-    plan_as_of = pd.Timestamp(plan["source_as_of_date"]).date() if plan and plan.get("source_as_of_date") else None
-    prices = _latest_price_map(plan_as_of)
+    prices = _latest_price_map()
     enriched_positions = []
     total_market_value = 0.0
     total_cost = 0.0
@@ -1579,6 +1966,15 @@ def load_demo_trading_snapshot(
 def _load_plan_items(plan_id: str) -> list[dict[str, Any]]:
     """Load plan items for display and execution."""
     with get_connection(read_only=True) as conn:
+        plan_row = conn.execute(
+            """
+            SELECT source_as_of_date
+            FROM demo_trading_daily_plans
+            WHERE plan_id = ?
+            """,
+            [plan_id],
+        ).fetchone()
+        source_as_of_date = pd.Timestamp(plan_row[0]).date() if plan_row and plan_row[0] else _today()
         rows = conn.execute(
             """
             SELECT symbol, proposed_action, recommendation, score, confidence,
@@ -1601,9 +1997,17 @@ def _load_plan_items(plan_id: str) -> list[dict[str, Any]]:
             """,
             [plan_id],
         ).fetchall()
-    return [
-        {
-            "symbol": row[0],
+    symbols = [str(row[0]) for row in rows]
+    contexts = _context_rows(symbols, source_as_of_date)
+    qaoa_signals = _qaoa_rows(symbols, source_as_of_date)
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        symbol = str(row[0])
+        ctx = contexts.get(symbol, {})
+        qaoa = qaoa_signals.get(symbol, {})
+        rationale = _safe_json(row[13] or "{}")
+        item = {
+            "symbol": symbol,
             "proposed_action": row[1],
             "recommendation": row[2],
             "score": _safe_float(row[3]),
@@ -1617,9 +2021,20 @@ def _load_plan_items(plan_id: str) -> list[dict[str, Any]]:
             "target_value": _safe_float(row[11]),
             "suggested_quantity": int(row[12] or 0),
             "rationale_json": row[13] or "{}",
+            "rationale": rationale,
+            "indicator_signals": _indicator_signal_verdicts(
+                ctx=ctx,
+                qaoa=qaoa,
+                recommendation=str(row[2] or ""),
+                action=str(row[1] or ""),
+                score=_safe_float(row[3]),
+                risk_level=str(row[5] or "unknown"),
+                sellable_quantity=int(row[8] or 0),
+            ),
+            "qaoa_signal": qaoa,
         }
-        for row in rows
-    ]
+        result.append(item)
+    return result
 
 
 def _load_trade_history(limit: int = 200) -> list[dict[str, Any]]:

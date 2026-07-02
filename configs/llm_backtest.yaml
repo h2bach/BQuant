@@ -1,0 +1,40 @@
+# BQuant VLLM + TA + QAOA backtest defaults.
+
+runtime:
+  mode: real_llm
+  max_tokens: 1024
+  temperature: 0.1
+  retry_invalid_once: true
+
+presets:
+  smoke:
+    trailing_trading_days: 5
+  core:
+    start_date: "2023-01-01"
+    end_date: latest
+  full:
+    start_date: "2017-07-01"
+    end_date: latest
+
+portfolio:
+  initial_cash: 50000000
+  max_positions: 8
+  max_symbol_weight: 0.15
+  min_cash_weight: 0.05
+  board_lot: 100
+  buy_fee_rate: 0.0015
+  sell_fee_rate: 0.0015
+  sell_tax_rate: 0.001
+  slippage_rate: 0.0005
+  execution_price: next_trading_day_open
+  valuation_price: daily_close
+  settlement_rule: T+2.5
+
+context:
+  candidate_limit: 6
+  skill_query: "BQuant technical analysis QAOA portfolio construction Vietnam T+2.5 backtest discipline"
+  skill_limit: 1
+  skill_max_total_chars: 600
+
+reports:
+  output_dir: agent_build_reports/llm_backtests

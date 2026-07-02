@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 
 from nicegui import ui
 from nicegui.client import Client
@@ -113,17 +114,17 @@ def render_demo_trading(client: Client) -> None:
     with ui.card().classes("bq-table-card w-full"):
         ui.label("Portfolio PnL + Agent Analysis").classes("text-xl font-semibold")
         ui.label(
-            "Historical PnL is calculated from entry open to current close. This does not mutate the demo ledger cost basis."
+            "PnL is calculated from the demo ledger average cost and current daily close. Manual BUY/SELL uses the latest execution preview, not the historical analysis price."
         ).classes("text-sm text-slate-400")
         with ui.row().classes("bq-control-row w-full"):
-            analysis_entry_input = ui.input(label="Buy point", value="2026-06-15").classes("bq-control-field")
-            analysis_as_of_input = ui.input(label="Data as-of", value="2026-06-30").classes("bq-control-field")
+            analysis_entry_input = ui.input(label="Signal reference from", value="2026-06-15").classes("bq-control-field")
+            analysis_as_of_input = ui.input(label="Data as-of", placeholder="latest").classes("bq-control-field")
             ui.button("Refresh Analysis", on_click=lambda: render_snapshot())
         analysis_container = ui.column().classes("w-full")
 
     with ui.card().classes("bq-table-card w-full"):
         ui.label("Daily Agent Plan").classes("text-xl font-semibold")
-        selected_symbol = ui.select(options=[], label="Selected executable plan item").classes("w-full")
+        selected_symbol = ui.select(options=[], label="Selected plan item").classes("w-full")
         plan_table = ui.table(
             columns=[
                 {"name": "symbol", "label": "Symbol", "field": "symbol", "sortable": True},
@@ -135,11 +136,14 @@ def render_demo_trading(client: Client) -> None:
                 {"name": "sellable_quantity", "label": "Sellable", "field": "sellable_quantity"},
                 {"name": "suggested_weight", "label": "Target W.", "field": "suggested_weight"},
                 {"name": "score", "label": "Score", "field": "score"},
+                {"name": "qaoa", "label": "QAOA", "field": "qaoa"},
+                {"name": "signal_bias", "label": "Signals", "field": "signal_bias"},
                 {"name": "risk_level", "label": "Risk", "field": "risk_level"},
             ],
             rows=[],
             pagination={"rowsPerPage": 15},
         ).classes("bq-data-table")
+        plan_rationale_container = ui.card().classes("bq-card w-full mt-3")
 
     with ui.card().classes("bq-table-card w-full"):
         ui.label("Current Positions").classes("text-xl font-semibold")
@@ -336,11 +340,12 @@ def render_demo_trading(client: Client) -> None:
                 ui.notify(str(preview["validation_message"]), type="negative", position="top")
                 _update_trade_preview()
                 return
+            execution_price = float(dialog_price_input.value or 0) or float(preview["price"])
             result = place_manual_trade(
                 action=str(dialog_action_select.value or ""),
                 symbol=str(dialog_symbol_input.value or ""),
                 quantity=int(float(dialog_quantity_input.value or 0)),
-                price=float(dialog_price_input.value or 0),
+                price=execution_price,
             )
             ui.notify(
                 f"{result['action']} {result['quantity']:,} {result['symbol']} filled at {_fmt_money(result['price'])} VND",
@@ -366,13 +371,17 @@ def render_demo_trading(client: Client) -> None:
             _update_trade_preview()
 
     def _prefill_trade_ticket(action: str, row: dict[str, object]) -> None:
-        """Open a trade dialog from one PnL table row."""
+        """Open a trade dialog from one PnL table row.
+
+        The PnL row may be rendered for a historical as-of date. Keep execution
+        price blank so the dialog preview resolves the latest available close.
+        """
         action_text = action.upper()
         quantity = int(row.get("sellable_quantity") or 0) if action_text == "SELL" else 100
         trade_action_select.value = action_text
         trade_symbol_input.value = str(row.get("symbol") or "")
         trade_quantity_input.value = quantity
-        trade_price_input.value = float(row.get("current_price") or 0)
+        trade_price_input.value = 0
         trade_action_select.update()
         trade_symbol_input.update()
         trade_quantity_input.update()
@@ -388,7 +397,7 @@ def render_demo_trading(client: Client) -> None:
                 action=action_text,
                 symbol=str(row.get("symbol") or ""),
                 quantity=quantity,
-                price=float(row.get("current_price") or 0),
+                price=0,
             )
 
     def _reset_account() -> None:
@@ -423,6 +432,62 @@ def render_demo_trading(client: Client) -> None:
         if action_text in {"TRIM", "WATCH"}:
             return "bq-warning"
         return "bq-neutral"
+
+    snapshot_state: dict[str, object] = {"plan_items": []}
+
+    def _render_selected_plan_rationale() -> None:
+        """Render signal-by-signal rationale for the selected daily plan item."""
+        plan_rationale_container.clear()
+        plan_items = list(snapshot_state.get("plan_items") or [])
+        selected = str(selected_symbol.value or "")
+        item = next((row for row in plan_items if str(row.get("symbol")) == selected), None)
+        executable = bool(
+            item
+            and item.get("proposed_action") in {"BUY", "SELL"}
+            and int(item.get("suggested_quantity") or 0) > 0
+        )
+        execute_selected_button.enable() if executable else execute_selected_button.disable()
+        with plan_rationale_container:
+            ui.label("Selected Plan Decision Rationale").classes("text-lg font-semibold")
+            if not item:
+                ui.label("Select a plan item to inspect TA, QAOA, settlement, and risk signals.").classes(
+                    "text-sm text-slate-400"
+                )
+                return
+            qaoa = dict(item.get("qaoa_signal") or {})
+            rationale = dict(item.get("rationale") or {})
+            raw_rationale = _safe_json_dict(rationale.get("raw_rationale_json"))
+            with ui.row().classes("bq-card-grid bq-metric-grid w-full"):
+                cards = [
+                    ("Symbol", str(item.get("symbol"))),
+                    ("Action", str(item.get("proposed_action"))),
+                    ("Agent State", str(item.get("recommendation"))),
+                    ("Score", f"{float(item.get('score') or 0):.3f}"),
+                    ("Confidence", f"{float(item.get('confidence') or 0):.3f}"),
+                    ("QAOA Weight", _fmt_pct(qaoa.get("proposed_weight")) if qaoa else "N/A"),
+                ]
+                for label, value in cards:
+                    with ui.card().classes("bq-card"):
+                        ui.label(label).classes("text-xs text-slate-400")
+                        ui.label(value).classes("text-base font-semibold")
+            if raw_rationale:
+                market = dict(raw_rationale.get("market") or {})
+                portfolio_overlay = dict(raw_rationale.get("portfolio_overlay") or {})
+                ui.label(
+                    "Agent rationale source: "
+                    f"market={market.get('market_regime', 'N/A')} / "
+                    f"portfolio_mode={portfolio_overlay.get('mode', 'N/A')} / "
+                    f"qaoa_enabled={portfolio_overlay.get('qaoa_enabled', 'N/A')}"
+                ).classes("text-xs text-slate-400")
+            ui.html(
+                _render_indicator_signals_html(
+                    item.get("indicator_signals") or [],
+                    max_visible=99,
+                ),
+                sanitize=False,
+            ).classes("w-full")
+
+    selected_symbol.on("update:model-value", lambda _: _render_selected_plan_rationale())
 
     def _render_pnl_trade_table(rows: list[dict[str, object]]) -> None:
         """Render the interactive PnL table with per-row BUY/SELL controls."""
@@ -459,7 +524,7 @@ def render_demo_trading(client: Client) -> None:
             "T+1",
             "T+2",
             "Sellable",
-            "Entry",
+            "Avg Cost",
             "Current",
             "Gross PnL",
             "Gross Return",
@@ -567,16 +632,19 @@ def render_demo_trading(client: Client) -> None:
         positions_rows = [_format_position_row(row, _fmt_money, _fmt_pct) for row in snapshot["positions"]]
         trade_history_rows = [_format_order_row(row, _fmt_money) for row in snapshot["trade_history"]]
 
+        all_plan_symbols = [row["symbol"] for row in snapshot["plan_items"]]
         executable_symbols = [
             row["symbol"]
             for row in snapshot["plan_items"]
             if row["proposed_action"] in {"BUY", "SELL"} and int(row["suggested_quantity"]) > 0
         ]
-        selected_symbol.options = executable_symbols
-        if selected_symbol.value not in executable_symbols:
-            selected_symbol.value = executable_symbols[0] if executable_symbols else None
+        selected_symbol.options = all_plan_symbols
+        if selected_symbol.value not in all_plan_symbols:
+            selected_symbol.value = executable_symbols[0] if executable_symbols else (all_plan_symbols[0] if all_plan_symbols else None)
         selected_symbol.update()
-        execute_selected_button.disable() if not executable_symbols else execute_selected_button.enable()
+        snapshot_state["plan_items"] = snapshot["plan_items"]
+        _render_selected_plan_rationale()
+        execute_selected_button.disable() if selected_symbol.value not in executable_symbols else execute_selected_button.enable()
 
         plan_table.rows = plan_rows
         positions_table.rows = positions_rows
@@ -590,6 +658,13 @@ def render_demo_trading(client: Client) -> None:
 
 def _format_plan_row(row: dict[str, object], money_formatter, pct_formatter) -> dict[str, object]:
     """Format one plan row for NiceGUI table display."""
+    qaoa = dict(row.get("qaoa_signal") or {})
+    selected = bool(qaoa.get("selected")) if qaoa else False
+    qaoa_weight = pct_formatter(qaoa.get("proposed_weight")) if qaoa else "N/A"
+    signals = list(row.get("indicator_signals") or [])
+    bullish_count = sum(1 for signal in signals if signal.get("verdict") == "bullish")
+    bearish_count = sum(1 for signal in signals if signal.get("verdict") == "bearish")
+    risk_count = sum(1 for signal in signals if signal.get("verdict") in {"risk", "blocked"})
     return {
         "symbol": row["symbol"],
         "proposed_action": row["proposed_action"],
@@ -600,6 +675,8 @@ def _format_plan_row(row: dict[str, object], money_formatter, pct_formatter) -> 
         "sellable_quantity": f"{int(row['sellable_quantity']):,}",
         "suggested_weight": pct_formatter(row["suggested_weight"]),
         "score": f"{float(row['score']):.3f}",
+        "qaoa": f"{'Selected' if selected else 'Not selected'} / {qaoa_weight}",
+        "signal_bias": f"Bull {bullish_count} / Bear {bearish_count} / Risk {risk_count}",
         "risk_level": row["risk_level"],
     }
 
@@ -709,9 +786,9 @@ def _render_portfolio_analysis_summary_html(analysis: dict[str, object]) -> str:
         .bq-neutral {{ color:#cbd5e1 !important; }}
       </style>
       <div class="bq-analysis-summary">
-        <div><span>Entry</span><strong>{esc(summary.get("entry_date"))}</strong></div>
+        <div><span>First Buy</span><strong>{esc(summary.get("entry_date") or "N/A")}</strong></div>
         <div><span>As-of</span><strong>{esc(summary.get("as_of_date"))}</strong></div>
-        <div><span>Entry Value</span><strong>{_analysis_money(summary.get("entry_value"))}</strong></div>
+        <div><span>Cost Basis</span><strong>{_analysis_money(summary.get("entry_value"))}</strong></div>
         <div><span>Current Value</span><strong>{_analysis_money(summary.get("current_value"))}</strong></div>
         <div><span>Gross PnL</span><strong class="{_analysis_value_class(summary.get("gross_pnl"))}">{_analysis_money(summary.get("gross_pnl"))}</strong></div>
         <div><span>Gross Return</span><strong class="{_analysis_value_class(summary.get("gross_return"))}">{_analysis_pct(summary.get("gross_return"))}</strong></div>
@@ -742,9 +819,13 @@ def _render_portfolio_reason_cards_html(analysis: dict[str, object]) -> str:
                 <strong>{esc(row.get('symbol'))}</strong>
                 <span class="{action_class}">{esc(row.get('action'))}</span>
               </div>
-              <p><span>Buy thesis</span>{esc(reason.get('buy'))}</p>
-              <p><span>Hold case</span>{esc(reason.get('hold'))}</p>
-              <p><span>Sell/trim trigger</span>{esc(reason.get('sell'))}</p>
+              <details class="bq-thesis-toggle">
+                <summary>Portfolio thesis</summary>
+                <p><span>Buy thesis</span>{esc(reason.get('buy'))}</p>
+                <p><span>Hold case</span>{esc(reason.get('hold'))}</p>
+                <p><span>Sell/trim trigger</span>{esc(reason.get('sell'))}</p>
+              </details>
+              {_render_indicator_signals_html(row.get("indicator_signals") or [])}
             </div>
             """
         )
@@ -762,11 +843,22 @@ def _render_portfolio_reason_cards_html(analysis: dict[str, object]) -> str:
         .bq-reason-card {{
           border:1px solid rgba(148,163,184,0.18); border-radius:8px;
           background:rgba(15,23,42,0.42); padding:12px;
+          min-width:0; overflow:visible;
         }}
         .bq-reason-head {{ display:flex; justify-content:space-between; gap:10px; margin-bottom:8px; }}
-        .bq-reason-card p {{ margin:8px 0 0 0; line-height:1.45; color:#cbd5e1; }}
+        .bq-reason-card p {{
+          margin:8px 0 0 0; line-height:1.45; color:#cbd5e1;
+          overflow-wrap:anywhere; word-break:break-word;
+        }}
         .bq-reason-card p span {{
           display:block; color:#93c5fd; font-size:11px; font-weight:700; text-transform:uppercase; margin-bottom:2px;
+        }}
+        .bq-thesis-toggle {{
+          margin:8px 0 4px 0; border:1px solid rgba(148,163,184,0.14);
+          border-radius:8px; padding:7px 9px; background:rgba(15,23,42,0.34);
+        }}
+        .bq-thesis-toggle summary {{
+          cursor:pointer; color:#93c5fd; font-size:12px; font-weight:700;
         }}
         .bq-analysis-empty {{ color:#94a3b8; padding:10px 0; }}
       </style>
@@ -775,164 +867,193 @@ def _render_portfolio_reason_cards_html(analysis: dict[str, object]) -> str:
     """
 
 
-def _render_portfolio_analysis_html(analysis: dict[str, object]) -> str:
-    """Render colored portfolio PnL and agent reasoning.
+def _safe_json_dict(value: object) -> dict[str, object]:
+    """Parse nested rationale JSON values for UI display."""
+    if isinstance(value, dict):
+        return value
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _render_indicator_signals_html(signals: object, *, max_visible: int = 7) -> str:
+    """Render indicator verdicts as compact hover/click chips.
 
     Args:
-        analysis: Payload returned by
-            `apps.web.services.demo_trading.load_demo_portfolio_analysis`.
+        signals: Sequence of indicator verdict dictionaries created by the
+            demo trading service. Each item should contain `label`, `verdict`,
+            `icon`, `evidence`, and `implication`.
+        max_visible: Maximum number of signal chips shown in a card. The UI
+            keeps the highest-signal diagnostics visible and collapses the rest
+            into a muted count to avoid visual overload.
 
     Returns:
-        Safe HTML string with local CSS classes. Text color encodes trend:
-        positive values are green, negative values are red, neutral/watch
-        values are amber or slate.
+        Safe HTML for the signal chip row. Detailed explanations are rendered
+        in a card-width popover that appears on hover or click.
     """
-    summary = dict(analysis.get("summary") or {})
-    rows = list(analysis.get("rows") or [])
+    rows = list(signals or [])
     if not rows:
-        return "<div class='bq-analysis-empty'>No open positions to analyze.</div>"
+        return "<div class='bq-signal-empty'>No indicator-level rationale available.</div>"
 
-    def money(value: object) -> str:
-        try:
-            return f"{float(value):,.0f}"
-        except (TypeError, ValueError):
-            return "N/A"
+    priority = [
+        "Decision synthesis",
+        "Trend / MA structure",
+        "RSI 14",
+        "MACD histogram",
+        "Relative strength 20D",
+        "Risk / volatility",
+        "QAOA optimizer",
+        "TA composite",
+    ]
+    selected: list[dict[str, object]] = []
+    selected_labels: set[str] = set()
+    rows_by_label = {str(row.get("label")): row for row in rows if isinstance(row, dict)}
+    for label in priority:
+        if label in rows_by_label and len(selected) < max_visible:
+            selected.append(rows_by_label[label])
+            selected_labels.add(label)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        label = str(row.get("label"))
+        if label not in selected_labels and len(selected) < max_visible:
+            selected.append(row)
+            selected_labels.add(label)
 
-    def pct(value: object) -> str:
-        try:
-            return f"{float(value) * 100:+.2f}%"
-        except (TypeError, ValueError):
-            return "N/A"
-
-    def css_for_value(value: object) -> str:
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError):
-            return "bq-neutral"
-        if numeric > 0.005:
-            return "bq-positive"
-        if numeric < -0.005:
-            return "bq-negative"
-        return "bq-neutral"
-
-    def css_for_action(action: object) -> str:
-        action_text = str(action)
-        if action_text == "HOLD":
-            return "bq-positive"
-        if action_text == "SELL":
-            return "bq-negative"
-        if action_text in {"TRIM", "WATCH"}:
-            return "bq-warning"
-        return "bq-neutral"
+    hidden_count = max(0, len(rows) - len(selected))
 
     def esc(value: object) -> str:
         return html.escape(str(value if value is not None else ""))
 
-    summary_html = f"""
-      <div class="bq-analysis-summary">
-        <div><span>Entry</span><strong>{esc(summary.get("entry_date"))}</strong></div>
-        <div><span>As-of</span><strong>{esc(summary.get("as_of_date"))}</strong></div>
-        <div><span>Entry Value</span><strong>{money(summary.get("entry_value"))}</strong></div>
-        <div><span>Current Value</span><strong>{money(summary.get("current_value"))}</strong></div>
-        <div><span>Gross PnL</span><strong class="{css_for_value(summary.get("gross_pnl"))}">{money(summary.get("gross_pnl"))}</strong></div>
-        <div><span>Gross Return</span><strong class="{css_for_value(summary.get("gross_return"))}">{pct(summary.get("gross_return"))}</strong></div>
-        <div><span>Net If Closed</span><strong class="{css_for_value(summary.get("net_if_closed_pnl"))}">{money(summary.get("net_if_closed_pnl"))}</strong></div>
-        <div><span>W/L/N</span><strong>{int(summary.get("winners", 0))}/{int(summary.get("losers", 0))}/{int(summary.get("neutral", 0))}</strong></div>
-      </div>
-    """
+    def cls(verdict: object) -> str:
+        verdict_text = str(verdict)
+        if verdict_text == "bullish":
+            return "bq-signal-bullish"
+        if verdict_text == "bearish":
+            return "bq-signal-bearish"
+        if verdict_text in {"risk", "blocked"}:
+            return "bq-signal-risk"
+        return "bq-signal-neutral"
 
-    table_rows = []
-    reason_cards = []
-    for row in rows:
-        action_class = css_for_action(row.get("action"))
-        pnl_class = css_for_value(row.get("gross_pnl"))
-        return_class = css_for_value(row.get("gross_return"))
-        table_rows.append(
-            "<tr>"
-            f"<td><strong>{esc(row.get('symbol'))}</strong></td>"
-            f"<td>{int(row.get('quantity') or 0):,}</td>"
-            f"<td>{money(row.get('entry_price'))}</td>"
-            f"<td>{money(row.get('current_price'))}</td>"
-            f"<td class='{pnl_class}'>{money(row.get('gross_pnl'))}</td>"
-            f"<td class='{return_class}'>{pct(row.get('gross_return'))}</td>"
-            f"<td class='{css_for_value(row.get('net_if_closed_pnl'))}'>{money(row.get('net_if_closed_pnl'))}</td>"
-            f"<td class='{action_class}'><strong>{esc(row.get('action'))}</strong></td>"
-            f"<td>{esc(row.get('recommendation'))}</td>"
-            f"<td>{float(row.get('score') or 0):.3f}</td>"
-            f"<td>{esc(row.get('risk_level'))}</td>"
-            f"<td>{esc(row.get('trend_state'))}</td>"
-            f"</tr>"
-        )
-        reason = dict(row.get("reasons") or {})
-        reason_cards.append(
+    def icon(value: object) -> str:
+        return html.escape(str(value or "analytics"))
+
+    cards = []
+    for index, signal in enumerate(selected):
+        cards.append(
             f"""
-            <div class="bq-reason-card">
-              <div class="bq-reason-head">
-                <strong>{esc(row.get('symbol'))}</strong>
-                <span class="{action_class}">{esc(row.get('action'))}</span>
+            <div class="bq-signal-chip-wrap" style="--bq-signal-z:{100 + index};">
+              <details class="bq-signal-chip {cls(signal.get('verdict'))}">
+                <summary>
+                  <span class="material-icons bq-signal-icon">{icon(signal.get('icon'))}</span>
+                  <span class="bq-signal-label">{esc(signal.get('label'))}</span>
+                  <span class="bq-signal-dot" title="{esc(signal.get('verdict'))}"></span>
+                </summary>
+              </details>
+              <div class="bq-signal-detail" role="tooltip">
+                <div class="bq-signal-meta">
+                  <span>Signal tag</span><strong>{esc(signal.get('verdict'))}</strong>
+                </div>
+                <div class="bq-signal-evidence"><span>Evidence</span>{esc(signal.get('evidence'))}</div>
+                <div class="bq-signal-implication"><span>Context-aware impact</span>{esc(signal.get('implication'))}</div>
               </div>
-              <p><span>Buy thesis</span>{esc(reason.get('buy'))}</p>
-              <p><span>Hold case</span>{esc(reason.get('hold'))}</p>
-              <p><span>Sell/trim trigger</span>{esc(reason.get('sell'))}</p>
             </div>
             """
         )
+    if hidden_count:
+        cards.append(f"<span class='bq-signal-more'>+{hidden_count} more signals</span>")
 
     return f"""
-    <div class="bq-analysis-root">
+    <div class="bq-signal-root">
       <style>
-        .bq-analysis-root {{ color:#e5e7eb; font-size:13px; }}
-        .bq-analysis-summary {{
-          display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr));
-          gap:10px; margin:12px 0 14px 0;
+        .bq-signal-root {{
+          display:flex; flex-wrap:wrap; gap:8px; margin-top:12px;
+          min-width:0; max-width:100%; overflow:visible; position:relative;
         }}
-        .bq-analysis-summary div {{
+        .bq-signal-chip-wrap {{
+          display:flex; flex-direction:column; min-width:0; max-width:100%;
+          flex:0 1 auto;
+        }}
+        .bq-signal-chip-wrap:hover,
+        .bq-signal-chip-wrap:focus-within,
+        .bq-signal-chip-wrap:has(.bq-signal-chip[open]) {{
+          flex:1 1 100%; width:100%; z-index:var(--bq-signal-z, 100);
+        }}
+        .bq-signal-chip {{
           border:1px solid rgba(148,163,184,0.18); border-radius:8px;
-          background:rgba(15,23,42,0.45); padding:10px 12px;
+          background:rgba(15,23,42,0.38);
+          min-width:0; max-width:100%; box-sizing:border-box; width:max-content;
+          overflow:visible;
         }}
-        .bq-analysis-summary span {{
-          display:block; color:#93c5fd; font-size:11px; margin-bottom:4px;
+        .bq-signal-chip summary {{
+          list-style:none; cursor:pointer; display:flex; align-items:center; gap:7px;
+          padding:7px 9px; color:#e5e7eb; user-select:none;
+          min-width:0; max-width:100%; box-sizing:border-box;
         }}
-        .bq-analysis-summary strong {{ font-size:14px; }}
-        .bq-analysis-table-wrap {{ overflow-x:auto; border:1px solid rgba(148,163,184,0.18); border-radius:8px; }}
-        .bq-analysis-table {{ width:100%; border-collapse:collapse; min-width:1040px; }}
-        .bq-analysis-table th, .bq-analysis-table td {{
-          padding:8px 10px; border-bottom:1px solid rgba(148,163,184,0.12); text-align:right;
+        .bq-signal-chip summary::-webkit-details-marker {{ display:none; }}
+        .bq-signal-icon {{ font-size:17px !important; line-height:1; opacity:0.95; }}
+        .bq-signal-label {{
+          font-size:12px; font-weight:700;
+          min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
         }}
-        .bq-analysis-table th {{ color:#93c5fd; font-size:11px; font-weight:700; }}
-        .bq-analysis-table th:first-child, .bq-analysis-table td:first-child {{ text-align:left; }}
-        .bq-positive {{ color:#22c55e !important; }}
-        .bq-negative {{ color:#ef4444 !important; }}
-        .bq-warning {{ color:#f59e0b !important; }}
-        .bq-neutral {{ color:#cbd5e1 !important; }}
-        .bq-reason-grid {{
-          display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr));
-          gap:12px; margin-top:14px;
+        .bq-signal-dot {{
+          flex:0 0 8px; width:8px; height:8px; margin-left:auto;
+          border-radius:999px; background:#94a3b8;
+          box-shadow:0 0 0 3px rgba(148,163,184,0.12);
         }}
-        .bq-reason-card {{
-          border:1px solid rgba(148,163,184,0.18); border-radius:8px;
-          background:rgba(15,23,42,0.42); padding:12px;
+        .bq-signal-chip[open] summary, .bq-signal-chip-wrap:hover summary {{
+          background:rgba(30,41,59,0.72); border-radius:8px;
         }}
-        .bq-reason-head {{ display:flex; justify-content:space-between; gap:10px; margin-bottom:8px; }}
-        .bq-reason-card p {{ margin:8px 0 0 0; line-height:1.45; color:#cbd5e1; }}
-        .bq-reason-card p span {{
-          display:block; color:#93c5fd; font-size:11px; font-weight:700; text-transform:uppercase; margin-bottom:2px;
+        .bq-signal-detail {{
+          display:none; position:static; margin-top:8px;
+          width:100%; max-width:100%; box-sizing:border-box;
+          border:1px solid rgba(148,163,184,0.28); border-radius:8px;
+          background:rgba(15,23,42,0.98); padding:10px 12px;
+          box-shadow:0 10px 24px rgba(0,0,0,0.30);
+          overflow-wrap:anywhere; word-break:break-word;
         }}
-        .bq-analysis-empty {{ color:#94a3b8; padding:10px 0; }}
+        .bq-signal-chip-wrap:hover .bq-signal-detail,
+        .bq-signal-chip-wrap:focus-within .bq-signal-detail,
+        .bq-signal-chip[open] + .bq-signal-detail {{
+          display:block;
+        }}
+        .bq-signal-meta {{
+          display:flex; align-items:center; justify-content:space-between; gap:8px;
+          margin-bottom:8px;
+        }}
+        .bq-signal-meta span {{
+          color:#94a3b8; font-size:10px; font-weight:700; text-transform:uppercase;
+        }}
+        .bq-signal-meta strong {{
+          color:#cbd5e1; font-size:10px; text-transform:uppercase; border-radius:999px;
+          padding:2px 7px; border:1px solid rgba(148,163,184,0.22);
+        }}
+        .bq-signal-evidence {{ color:#93c5fd; font-size:12px; }}
+        .bq-signal-implication {{
+          color:#cbd5e1; font-size:12px; line-height:1.45; margin-top:6px;
+          overflow-wrap:anywhere; word-break:break-word;
+        }}
+        .bq-signal-evidence span, .bq-signal-implication span {{
+          display:block; color:#94a3b8; font-size:10px; font-weight:700; text-transform:uppercase; margin-bottom:2px;
+        }}
+        .bq-signal-bullish {{ border-color:rgba(34,197,94,0.36); }}
+        .bq-signal-bullish .bq-signal-icon, .bq-signal-bullish + .bq-signal-detail .bq-signal-meta strong {{ color:#22c55e; }}
+        .bq-signal-bullish .bq-signal-dot {{ background:#22c55e; box-shadow:0 0 0 3px rgba(34,197,94,0.14); }}
+        .bq-signal-bearish {{ border-color:rgba(239,68,68,0.36); }}
+        .bq-signal-bearish .bq-signal-icon, .bq-signal-bearish + .bq-signal-detail .bq-signal-meta strong {{ color:#ef4444; }}
+        .bq-signal-bearish .bq-signal-dot {{ background:#ef4444; box-shadow:0 0 0 3px rgba(239,68,68,0.14); }}
+        .bq-signal-risk {{ border-color:rgba(245,158,11,0.42); }}
+        .bq-signal-risk .bq-signal-icon, .bq-signal-risk + .bq-signal-detail .bq-signal-meta strong {{ color:#f59e0b; }}
+        .bq-signal-risk .bq-signal-dot {{ background:#f59e0b; box-shadow:0 0 0 3px rgba(245,158,11,0.14); }}
+        .bq-signal-neutral .bq-signal-icon, .bq-signal-neutral + .bq-signal-detail .bq-signal-meta strong {{ color:#cbd5e1; }}
+        .bq-signal-more {{
+          align-self:center; color:#94a3b8; font-size:11px; padding:7px 4px;
+          white-space:nowrap;
+        }}
+        .bq-signal-empty {{ color:#94a3b8; font-size:12px; margin-top:8px; }}
       </style>
-      {summary_html}
-      <div class="bq-analysis-table-wrap">
-        <table class="bq-analysis-table">
-          <thead>
-            <tr>
-              <th>Symbol</th><th>Qty</th><th>Entry</th><th>Current</th><th>Gross PnL</th>
-              <th>Gross Return</th><th>Net If Closed</th><th>Action</th><th>Agent State</th>
-              <th>Score</th><th>Risk</th><th>Trend</th>
-            </tr>
-          </thead>
-          <tbody>{''.join(table_rows)}</tbody>
-        </table>
-      </div>
-      <div class="bq-reason-grid">{''.join(reason_cards)}</div>
+      {''.join(cards)}
     </div>
     """

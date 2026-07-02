@@ -519,6 +519,100 @@ def collect_chart_ta_summary() -> dict[str, Any]:
     }
 
 
+def _optional_date(value: Any) -> date | None:
+    """Convert a nullable scalar into a date.
+
+    Args:
+        value: Date-like scalar from DuckDB, pandas, JSON, or user input.
+
+    Returns:
+        Parsed date, or `None` when the value is missing or invalid.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        return pd.Timestamp(value).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _latest_agent_context_date() -> date | None:
+    """Read the latest trading date available to recommendation agents.
+
+    Returns:
+        Maximum `trading_date` in `analytics_marts.mart_agent_context_daily`,
+        or `None` if the mart is unavailable or empty.
+    """
+    try:
+        row = _single_row(
+            """
+            SELECT max(trading_date) AS latest_context_date
+            FROM analytics_marts.mart_agent_context_daily
+            """
+        )
+    except Exception:
+        return None
+    return _optional_date(row.get("latest_context_date"))
+
+
+def _recommendation_freshness(
+    recommendation_date: Any,
+    latest_context_date: Any,
+) -> dict[str, Any]:
+    """Compare recommendation date with the latest available agent context.
+
+    Args:
+        recommendation_date: Latest recommendation `as_of_date`, if any.
+        latest_context_date: Latest dbt mart context date used by the agent.
+
+    Returns:
+        JSON-safe freshness metadata for reports, chat prompts, and UI warnings.
+    """
+    recommendation_day = _optional_date(recommendation_date)
+    context_day = _optional_date(latest_context_date)
+    if context_day is None:
+        return {
+            "recommendation_as_of_date": recommendation_day.isoformat() if recommendation_day else None,
+            "latest_context_date": None,
+            "recommendation_stale": False,
+            "recommendation_lag_trading_days": None,
+            "freshness_status": "unknown",
+            "freshness_message": "Agent context mart is unavailable; recommendation freshness cannot be verified.",
+        }
+    if recommendation_day is None:
+        return {
+            "recommendation_as_of_date": None,
+            "latest_context_date": context_day.isoformat(),
+            "recommendation_stale": True,
+            "recommendation_lag_trading_days": None,
+            "freshness_status": "missing",
+            "freshness_message": "No successful recommendation run is available for the latest agent context.",
+        }
+    lag_days = _trading_day_gap(recommendation_day, context_day)
+    stale = lag_days > 0
+    return {
+        "recommendation_as_of_date": recommendation_day.isoformat(),
+        "latest_context_date": context_day.isoformat(),
+        "recommendation_stale": stale,
+        "recommendation_lag_trading_days": lag_days,
+        "freshness_status": "stale" if stale else "fresh",
+        "freshness_message": (
+            f"Recommendations lag latest agent context by {lag_days} trading day(s)."
+            if stale
+            else "Recommendations match the latest available agent context."
+        ),
+    }
+
+
 def collect_portfolio_summary(*, refresh_recommendations: bool, trigger_type: str) -> dict[str, Any]:
     """Run/read portfolio optimizer agent outputs.
 
@@ -535,6 +629,7 @@ def collect_portfolio_summary(*, refresh_recommendations: bool, trigger_type: st
     if refresh_recommendations:
         cycle_result = run_agent_cycle(trigger_type=trigger_type)
 
+    latest_context_date = _latest_agent_context_date()
     recommendations = _frame(
         """
         SELECT *
@@ -547,6 +642,7 @@ def collect_portfolio_summary(*, refresh_recommendations: bool, trigger_type: st
             "agent": "portfolio_optimizer_agent",
             "status": "no_recommendations",
             "cycle_result": cycle_result,
+            **_recommendation_freshness(None, latest_context_date),
             "recommendation_counts": [],
             "top_weights": [],
             "watchlist": [],
@@ -573,12 +669,14 @@ def collect_portfolio_summary(*, refresh_recommendations: bool, trigger_type: st
         .head(10)
         .to_dict("records")
     )
-    as_of_date = str(recommendations["as_of_date"].max())
+    latest_recommendation_date = _optional_date(recommendations["as_of_date"].max())
+    as_of_date = latest_recommendation_date.isoformat() if latest_recommendation_date else None
     return {
         "agent": "portfolio_optimizer_agent",
         "status": "ready",
         "as_of_date": as_of_date,
         "cycle_result": cycle_result,
+        **_recommendation_freshness(latest_recommendation_date, latest_context_date),
         "recommendation_counts": counts,
         "top_weights": top_weights,
         "watchlist": watchlist,
@@ -698,6 +796,11 @@ def _render_report(sections: dict[str, Any]) -> str:
             "",
             f"- Recommendation date: `{portfolio.get('as_of_date', 'N/A')}`",
             f"- Status: **{portfolio.get('status')}**",
+            (
+                "- Recommendation freshness: "
+                f"**{portfolio.get('freshness_status', 'unknown')}**; "
+                f"{portfolio.get('freshness_message', 'freshness not evaluated')}"
+            ),
         ]
     )
     counts = portfolio.get("recommendation_counts") or []
@@ -760,10 +863,16 @@ def _answer_from_sections(question: str, sections: dict[str, Any]) -> str:
     if any(keyword in lowered for keyword in ["portfolio", "weight", "allocation", "danh muc", "toi uu"]):
         watchlist = portfolio.get("watchlist") or []
         names = ", ".join(row["symbol"] for row in watchlist[:5]) if watchlist else "no active candidates"
+        freshness_note = ""
+        if portfolio.get("recommendation_stale") or portfolio.get("recommendation_refresh_status") == "failed":
+            freshness_note = f" Freshness warning: {portfolio.get('freshness_message')}"
+            if portfolio.get("recommendation_refresh_error"):
+                freshness_note += f" Refresh failed: {portfolio.get('recommendation_refresh_error')}"
         return (
             "Portfolio view: "
             f"{portfolio.get('status')}. Current highest ranked names are {names}. "
             "Suggested weights remain conservative because allocation is only assigned to symbols crossing the candidate_long threshold."
+            f"{freshness_note}"
         )
     if any(keyword in lowered for keyword in ["chart", "ta", "vnindex", "vn30", "market", "trend"]):
         return (
@@ -781,7 +890,8 @@ def _answer_from_sections(question: str, sections: dict[str, Any]) -> str:
     return (
         "Latest BQuant analysis combines data health, market TA, and portfolio recommendations. "
         f"Data is {health['status']}; market regime is {market.get('market_regime')}; "
-        f"portfolio agent status is {portfolio.get('status')}."
+        f"portfolio agent status is {portfolio.get('status')}. "
+        f"Recommendation freshness: {portfolio.get('freshness_status', 'unknown')}."
     )
 
 
@@ -815,11 +925,145 @@ def build_live_analysis_sections(
     }
 
 
-def _compact_sections_for_llm(sections: dict[str, Any]) -> dict[str, Any]:
+def _compact_symbol_signals(portfolio: dict[str, Any], limit: int = 10) -> list[dict[str, Any]]:
+    """Build detailed symbol-level signal context for the live LLM prompt.
+
+    Args:
+        portfolio: Portfolio summary from `collect_portfolio_summary`.
+        limit: Maximum number of symbols included in the compact prompt.
+
+    Returns:
+        List of compact signal dictionaries combining latest agent
+        recommendations, deterministic rationale, and dbt mart features.
+    """
+    try:
+        as_of_raw = portfolio.get("as_of_date")
+        as_of_date = pd.Timestamp(as_of_raw).date() if as_of_raw else None
+    except Exception:
+        as_of_date = None
+
+    preferred_symbols = _portfolio_signal_symbols(portfolio, limit)
+    recommendations = _latest_recommendation_rows_for_signals(
+        symbols=preferred_symbols,
+        as_of_date=as_of_date,
+        limit=limit,
+    )
+    if recommendations.empty:
+        return []
+
+    symbols = [str(symbol).upper() for symbol in recommendations["symbol"].tolist()]
+    context = _latest_context_rows_for_signals(symbols, as_of_date)
+    context_by_symbol = {
+        str(row["symbol"]).upper(): row
+        for _, row in context.iterrows()
+    }
+
+    compact: list[dict[str, Any]] = []
+    for _, rec in recommendations.iterrows():
+        symbol = str(rec.get("symbol") or "").upper()
+        ctx = context_by_symbol.get(symbol)
+        rationale = _safe_json_loads(rec.get("rationale_json"))
+        symbol_rationale = rationale.get("symbol", {}) if isinstance(rationale.get("symbol"), dict) else {}
+        market_rationale = rationale.get("market", {}) if isinstance(rationale.get("market"), dict) else {}
+        risk_rationale = rationale.get("risk", {}) if isinstance(rationale.get("risk"), dict) else {}
+        quality_rationale = rationale.get("quality", {}) if isinstance(rationale.get("quality"), dict) else {}
+        component_scores = symbol_rationale.get("component_scores", {})
+        compact.append(
+            {
+                "symbol": symbol,
+                "recommendation": rec.get("recommendation"),
+                "score": _round_optional(rec.get("score"), 4),
+                "confidence": _round_optional(rec.get("confidence"), 4),
+                "risk_level": rec.get("risk_level"),
+                "suggested_weight": _round_optional(rec.get("suggested_weight"), 6),
+                "source": {
+                    "recommendation_as_of_date": str(rec.get("as_of_date")) if rec.get("as_of_date") is not None else None,
+                    "context_date": str(ctx.get("trading_date")) if ctx is not None and ctx.get("trading_date") is not None else None,
+                },
+                "signals": {
+                    "close": _round_optional(ctx.get("close")) if ctx is not None else None,
+                    "volume": _round_optional(ctx.get("volume"), 0) if ctx is not None else None,
+                    "return_1d": _round_optional(ctx.get("return_1d"), 6) if ctx is not None else None,
+                    "return_5d": _round_optional(ctx.get("return_5d"), 6) if ctx is not None else None,
+                    "return_20d": _round_optional(ctx.get("return_20d"), 6) if ctx is not None else None,
+                    "return_60d": _round_optional(ctx.get("return_60d"), 6) if ctx is not None else None,
+                    "volatility_20d": _round_optional(ctx.get("volatility_20d"), 6) if ctx is not None else None,
+                    "volatility_60d": _round_optional(ctx.get("volatility_60d"), 6) if ctx is not None else None,
+                    "drawdown_from_peak": _round_optional(ctx.get("drawdown_from_peak"), 6) if ctx is not None else None,
+                    "relative_strength_20d": _round_optional(ctx.get("relative_strength_20d"), 6)
+                    if ctx is not None
+                    else None,
+                    "relative_strength_60d": _round_optional(ctx.get("relative_strength_60d"), 6)
+                    if ctx is not None
+                    else None,
+                    "traded_value_percentile": _round_optional(ctx.get("traded_value_cross_section_percentile"), 2)
+                    if ctx is not None
+                    else None,
+                    "trend_state": ctx.get("trend_state") if ctx is not None else symbol_rationale.get("trend_state"),
+                    "agent_candidate_state": ctx.get("agent_candidate_state") if ctx is not None else None,
+                    "liquidity_state": ctx.get("liquidity_state") if ctx is not None else None,
+                    "ta_action_bias": ctx.get("ta_action_bias") if ctx is not None else None,
+                    "ta_risk_flag": ctx.get("ta_risk_flag") if ctx is not None else None,
+                    "ta_composite_score": _round_optional(ctx.get("ta_composite_score"), 4)
+                    if ctx is not None
+                    else None,
+                    "rsi_14": _round_optional(ctx.get("rsi_14"), 2) if ctx is not None else None,
+                    "macd_histogram": _round_optional(ctx.get("macd_histogram"), 6)
+                    if ctx is not None
+                    else None,
+                    "adx_14": _round_optional(ctx.get("adx_14"), 2) if ctx is not None else None,
+                    "atr_pct_14": _round_optional(ctx.get("atr_pct_14"), 6) if ctx is not None else None,
+                    "volume_zscore_20": _round_optional(ctx.get("volume_zscore_20"), 4)
+                    if ctx is not None
+                    else None,
+                    "data_quality_status": ctx.get("data_quality_status")
+                    if ctx is not None
+                    else quality_rationale.get("data_quality_status"),
+                    "stale_days": int(ctx.get("stale_days"))
+                    if ctx is not None and ctx.get("stale_days") is not None and not pd.isna(ctx.get("stale_days"))
+                    else quality_rationale.get("stale_days"),
+                },
+                "market_context": {
+                    "market_regime": ctx.get("market_regime") if ctx is not None else market_rationale.get("market_regime"),
+                    "volatility_regime": ctx.get("volatility_regime") if ctx is not None else market_rationale.get("volatility_regime"),
+                    "regime_score": _round_optional(ctx.get("regime_score"), 4)
+                    if ctx is not None
+                    else _round_optional(market_rationale.get("regime_score"), 4),
+                },
+                "component_scores": {
+                    "trend": _round_optional(component_scores.get("trend"), 4),
+                    "relative_strength": _round_optional(component_scores.get("relative_strength"), 4),
+                    "momentum": _round_optional(component_scores.get("momentum"), 4),
+                    "volatility": _round_optional(component_scores.get("volatility"), 4),
+                    "liquidity": _round_optional(component_scores.get("liquidity"), 4),
+                    "ta_trend": _round_optional(ctx.get("ta_trend_score"), 4) if ctx is not None else None,
+                    "ta_momentum": _round_optional(ctx.get("ta_momentum_score"), 4) if ctx is not None else None,
+                    "ta_volatility": _round_optional(ctx.get("ta_volatility_score"), 4) if ctx is not None else None,
+                    "ta_liquidity": _round_optional(ctx.get("ta_liquidity_score"), 4) if ctx is not None else None,
+                    "ta_relative_strength": _round_optional(ctx.get("ta_relative_strength_score"), 4)
+                    if ctx is not None
+                    else None,
+                },
+                "rationale_summary": {
+                    "quality_blocked": quality_rationale.get("blocked"),
+                    "quality_reasons": quality_rationale.get("reasons"),
+                    "market": _round_optional(market_rationale.get("contribution"), 4),
+                    "symbol": _round_optional(symbol_rationale.get("contribution"), 4),
+                    "risk_drawdown": _round_optional(risk_rationale.get("drawdown_from_peak"), 6),
+                },
+            }
+        )
+    return compact
+
+
+def _compact_sections_for_llm(sections: dict[str, Any], *, symbol_signal_limit: int = 10) -> dict[str, Any]:
     """Reduce full agent sections to the fields needed by the chat model.
 
     Args:
         sections: Fresh output from `build_live_analysis_sections`.
+        symbol_signal_limit: Maximum number of detailed per-symbol signal rows
+            to include. Live chat uses a smaller value to leave room for the
+            model answer inside an 8k-context local runtime.
 
     Returns:
         Compact JSON-safe context that fits a small local LLM prompt.
@@ -870,12 +1114,20 @@ def _compact_sections_for_llm(sections: dict[str, Any]) -> dict[str, Any]:
         "portfolio": {
             "status": portfolio.get("status"),
             "as_of_date": portfolio.get("as_of_date"),
+            "freshness_status": portfolio.get("freshness_status"),
+            "freshness_message": portfolio.get("freshness_message"),
+            "recommendation_stale": portfolio.get("recommendation_stale"),
+            "recommendation_lag_trading_days": portfolio.get("recommendation_lag_trading_days"),
+            "latest_context_date": portfolio.get("latest_context_date"),
+            "recommendation_refresh_attempted": portfolio.get("recommendation_refresh_attempted"),
+            "recommendation_refresh_status": portfolio.get("recommendation_refresh_status"),
+            "recommendation_refresh_error": portfolio.get("recommendation_refresh_error"),
             "recommendation_counts": portfolio.get("recommendation_counts"),
             "top_weights": _compact_rows(portfolio.get("top_weights"), limit=6),
             "watchlist": _compact_rows(portfolio.get("watchlist"), limit=6),
             "risk_off": _compact_rows(portfolio.get("risk_off"), limit=6),
         },
-        "symbol_signals": _compact_symbol_signals(portfolio, limit=10),
+        "symbol_signals": _compact_symbol_signals(portfolio, limit=symbol_signal_limit),
         "llm_runtime": {
             "enabled": sections.get("llm_runtime", {}).get("enabled"),
             "backend": sections.get("llm_runtime", {}).get("backend"),
@@ -1036,116 +1288,6 @@ def _latest_context_rows_for_signals(symbols: list[str], as_of_date: date | None
     )
 
 
-def _compact_symbol_signals(portfolio: dict[str, Any], limit: int = 10) -> list[dict[str, Any]]:
-    """Build detailed symbol-level signal context for the live LLM prompt.
-
-    Args:
-        portfolio: Portfolio summary from `collect_portfolio_summary`.
-        limit: Maximum number of symbols included in the compact prompt.
-
-    Returns:
-        List of compact signal dictionaries combining latest agent
-        recommendations, deterministic rationale, and dbt mart features.
-    """
-    try:
-        as_of_raw = portfolio.get("as_of_date")
-        as_of_date = pd.Timestamp(as_of_raw).date() if as_of_raw else None
-    except Exception:
-        as_of_date = None
-
-    preferred_symbols = _portfolio_signal_symbols(portfolio, limit)
-    recommendations = _latest_recommendation_rows_for_signals(
-        symbols=preferred_symbols,
-        as_of_date=as_of_date,
-        limit=limit,
-    )
-    if recommendations.empty:
-        return []
-
-    symbols = [str(symbol).upper() for symbol in recommendations["symbol"].tolist()]
-    context = _latest_context_rows_for_signals(symbols, as_of_date)
-    context_by_symbol = {
-        str(row["symbol"]).upper(): row
-        for _, row in context.iterrows()
-    }
-
-    compact: list[dict[str, Any]] = []
-    for _, rec in recommendations.iterrows():
-        symbol = str(rec.get("symbol") or "").upper()
-        ctx = context_by_symbol.get(symbol)
-        rationale = _safe_json_loads(rec.get("rationale_json"))
-        symbol_rationale = rationale.get("symbol", {}) if isinstance(rationale.get("symbol"), dict) else {}
-        market_rationale = rationale.get("market", {}) if isinstance(rationale.get("market"), dict) else {}
-        risk_rationale = rationale.get("risk", {}) if isinstance(rationale.get("risk"), dict) else {}
-        quality_rationale = rationale.get("quality", {}) if isinstance(rationale.get("quality"), dict) else {}
-        component_scores = symbol_rationale.get("component_scores", {})
-        compact.append(
-            {
-                "symbol": symbol,
-                "recommendation": rec.get("recommendation"),
-                "score": _round_optional(rec.get("score"), 4),
-                "confidence": _round_optional(rec.get("confidence"), 4),
-                "risk_level": rec.get("risk_level"),
-                "suggested_weight": _round_optional(rec.get("suggested_weight"), 6),
-                "source": {
-                    "recommendation_as_of_date": str(rec.get("as_of_date")) if rec.get("as_of_date") is not None else None,
-                    "context_date": str(ctx.get("trading_date")) if ctx is not None and ctx.get("trading_date") is not None else None,
-                },
-                "signals": {
-                    "close": _round_optional(ctx.get("close")) if ctx is not None else None,
-                    "volume": _round_optional(ctx.get("volume"), 0) if ctx is not None else None,
-                    "return_1d": _round_optional(ctx.get("return_1d"), 6) if ctx is not None else None,
-                    "return_5d": _round_optional(ctx.get("return_5d"), 6) if ctx is not None else None,
-                    "return_20d": _round_optional(ctx.get("return_20d"), 6) if ctx is not None else None,
-                    "return_60d": _round_optional(ctx.get("return_60d"), 6) if ctx is not None else None,
-                    "volatility_20d": _round_optional(ctx.get("volatility_20d"), 6) if ctx is not None else None,
-                    "volatility_60d": _round_optional(ctx.get("volatility_60d"), 6) if ctx is not None else None,
-                    "drawdown_from_peak": _round_optional(ctx.get("drawdown_from_peak"), 6) if ctx is not None else None,
-                    "relative_strength_20d": _round_optional(ctx.get("relative_strength_20d"), 6)
-                    if ctx is not None
-                    else None,
-                    "relative_strength_60d": _round_optional(ctx.get("relative_strength_60d"), 6)
-                    if ctx is not None
-                    else None,
-                    "traded_value_percentile": _round_optional(ctx.get("traded_value_cross_section_percentile"), 2)
-                    if ctx is not None
-                    else None,
-                    "trend_state": ctx.get("trend_state") if ctx is not None else symbol_rationale.get("trend_state"),
-                    "agent_candidate_state": ctx.get("agent_candidate_state") if ctx is not None else None,
-                    "liquidity_state": ctx.get("liquidity_state") if ctx is not None else None,
-                    "data_quality_status": ctx.get("data_quality_status")
-                    if ctx is not None
-                    else quality_rationale.get("data_quality_status"),
-                    "stale_days": int(ctx.get("stale_days"))
-                    if ctx is not None and ctx.get("stale_days") is not None and not pd.isna(ctx.get("stale_days"))
-                    else quality_rationale.get("stale_days"),
-                },
-                "market_context": {
-                    "market_regime": ctx.get("market_regime") if ctx is not None else market_rationale.get("market_regime"),
-                    "volatility_regime": ctx.get("volatility_regime") if ctx is not None else market_rationale.get("volatility_regime"),
-                    "regime_score": _round_optional(ctx.get("regime_score"), 4)
-                    if ctx is not None
-                    else _round_optional(market_rationale.get("regime_score"), 4),
-                },
-                "component_scores": {
-                    "trend": _round_optional(component_scores.get("trend"), 4),
-                    "relative_strength": _round_optional(component_scores.get("relative_strength"), 4),
-                    "momentum": _round_optional(component_scores.get("momentum"), 4),
-                    "volatility": _round_optional(component_scores.get("volatility"), 4),
-                    "liquidity": _round_optional(component_scores.get("liquidity"), 4),
-                },
-                "rationale_summary": {
-                    "quality_blocked": quality_rationale.get("blocked"),
-                    "quality_reasons": quality_rationale.get("reasons"),
-                    "market": _round_optional(market_rationale.get("contribution"), 4),
-                    "symbol": _round_optional(symbol_rationale.get("contribution"), 4),
-                    "risk_drawdown": _round_optional(risk_rationale.get("drawdown_from_peak"), 6),
-                },
-            }
-        )
-    return compact
-
-
 def _build_llm_messages(
     question: str,
     sections: dict[str, Any],
@@ -1163,7 +1305,7 @@ def _build_llm_messages(
         OpenAI-compatible message list.
     """
     context_json = json.dumps(
-        _compact_sections_for_llm(sections),
+        _compact_sections_for_llm(sections, symbol_signal_limit=6),
         ensure_ascii=False,
         default=_json_default,
         sort_keys=True,
@@ -1174,6 +1316,7 @@ def _build_llm_messages(
         "Answer in Vietnamese when the user writes Vietnamese; otherwise use the user's language. "
         "Ground every claim in the provided BQuant context. "
         "Be clear about data freshness, market signals, portfolio implications, and uncertainty. "
+        "If recommendation_stale is true or recommendation_refresh_status is failed, explicitly warn the user before portfolio advice. "
         "Do not claim guaranteed returns and do not invent data outside the context. "
         "Keep the answer concise but useful for decision support."
     )
@@ -1291,6 +1434,41 @@ def load_recent_agent_chat_messages(limit: int = 20) -> list[dict[str, Any]]:
     return frame.sort_values("event_ts").to_dict("records")
 
 
+def _portfolio_needs_recommendation_refresh(portfolio: dict[str, Any]) -> bool:
+    """Decide whether live chat should refresh recommendations before answering.
+
+    Args:
+        portfolio: Portfolio section from `build_live_analysis_sections`.
+
+    Returns:
+        `True` when no recommendation exists or the latest run lags the latest
+        available agent context mart.
+    """
+    return str(portfolio.get("status")) == "no_recommendations" or bool(portfolio.get("recommendation_stale"))
+
+
+def _annotate_recommendation_refresh(
+    sections: dict[str, Any],
+    *,
+    status: str,
+    error: str | None = None,
+) -> None:
+    """Attach refresh attempt metadata to the portfolio section.
+
+    Args:
+        sections: Mutable live-analysis sections dictionary.
+        status: `success`, `failed`, or `not_needed`.
+        error: Optional failure message from the refresh attempt.
+
+    Side Effects:
+        Updates `sections["portfolio"]` in place.
+    """
+    portfolio = sections.setdefault("portfolio", {})
+    portfolio["recommendation_refresh_attempted"] = status in {"success", "failed"}
+    portfolio["recommendation_refresh_status"] = status
+    portfolio["recommendation_refresh_error"] = error
+
+
 def answer_live_system_question(question: str) -> dict[str, Any]:
     """Answer a question with fresh BQuant context and a local live LLM.
 
@@ -1306,6 +1484,44 @@ def answer_live_system_question(question: str) -> dict[str, Any]:
 
     chat_id = create_run_id()
     sections = build_live_analysis_sections(refresh_recommendations=False, trigger_type="manual")
+    if _portfolio_needs_recommendation_refresh(sections.get("portfolio", {})):
+        logger = BQuantLogger(
+            "agent_live_chat",
+            component="agent",
+            subcomponent="live_chat",
+            default_channel="pipeline",
+        )
+        try:
+            logger.info(
+                "Refreshing stale recommendations before live chat answer",
+                event_type="recommendation_refresh",
+                status="running",
+                chat_id=chat_id,
+                freshness_status=sections.get("portfolio", {}).get("freshness_status"),
+                latest_context_date=sections.get("portfolio", {}).get("latest_context_date"),
+                recommendation_as_of_date=sections.get("portfolio", {}).get("recommendation_as_of_date"),
+            )
+            sections = build_live_analysis_sections(refresh_recommendations=True, trigger_type="manual")
+            _annotate_recommendation_refresh(sections, status="success")
+            logger.info(
+                "Recommendation refresh completed before live chat answer",
+                event_type="recommendation_refresh",
+                status="success",
+                chat_id=chat_id,
+                recommendation_as_of_date=sections.get("portfolio", {}).get("recommendation_as_of_date"),
+            )
+        except Exception as exc:
+            _annotate_recommendation_refresh(sections, status="failed", error=str(exc))
+            logger.log_error(
+                "refresh_recommendations_for_live_chat",
+                type(exc).__name__,
+                str(exc),
+                context={"chat_id": chat_id},
+                channel="pipeline",
+            )
+    else:
+        _annotate_recommendation_refresh(sections, status="not_needed")
+
     config = load_llm_config(LLM_RUNTIME_CONFIG_PATH)
     runtime = runtime_config(config)
     fallback_answer = _answer_from_sections(question, sections)
@@ -1318,7 +1534,7 @@ def answer_live_system_question(question: str) -> dict[str, Any]:
     availability = sections.get("llm_runtime", {}).get("availability") or {}
     if availability.get("available"):
         try:
-            knowledge_context = render_knowledge_context(question, limit=2, max_total_chars=2000)
+            knowledge_context = render_knowledge_context(question, limit=1, max_total_chars=600)
             llm_response = chat_completion(
                 _build_llm_messages(question, sections, knowledge_context=knowledge_context),
                 config=config,

@@ -41,6 +41,29 @@ models:
               arguments:
                 values: ["pass", "missing", "invalid_ohlc", "invalid_volume", "duplicate_rows", "stale", "manifest_mismatch"]
 
+  - name: mart_symbol_ta_signals_daily
+    description: Technical-analysis signal pack per VN30 stock and trading date for LLM and QAOA workflows.
+    columns:
+      - name: symbol_date_key
+        tests: [not_null, unique]
+      - name: symbol
+        tests: [not_null]
+      - name: trading_date
+        tests: [not_null]
+      - name: ta_composite_score
+        tests:
+          - non_negative
+      - name: ta_action_bias
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["bullish", "neutral", "bearish"]
+      - name: ta_risk_flag
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["low", "medium", "high"]
+
   - name: mart_agent_context_daily
     description: Single daily context mart for BQuant recommendation and research agents.
     columns:

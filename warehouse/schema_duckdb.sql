@@ -551,6 +551,171 @@ CREATE INDEX IF NOT EXISTS idx_backtest_runs_dates ON backtest_runs(start_date, 
 CREATE INDEX IF NOT EXISTS idx_backtest_runs_created ON backtest_runs(created_at);
 
 -- ============================================
+-- QAOA Optimizer Audit Tables
+-- ============================================
+CREATE TABLE IF NOT EXISTS qaoa_optimizer_runs (
+    run_id VARCHAR PRIMARY KEY,
+    as_of_date DATE NOT NULL,
+    status VARCHAR NOT NULL,
+    backend VARCHAR NOT NULL,
+    fallback_used BOOLEAN NOT NULL DEFAULT FALSE,
+    candidate_count INTEGER NOT NULL DEFAULT 0,
+    selected_count INTEGER NOT NULL DEFAULT 0,
+    energy DOUBLE,
+    config_json VARCHAR NOT NULL,
+    error_message VARCHAR,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS qaoa_optimizer_candidates (
+    run_id VARCHAR NOT NULL,
+    as_of_date DATE NOT NULL,
+    symbol VARCHAR NOT NULL,
+    rank INTEGER NOT NULL,
+    expected_alpha DOUBLE,
+    ta_composite_score DOUBLE,
+    ta_risk_flag VARCHAR,
+    liquidity_percentile DOUBLE,
+    volatility_20d DOUBLE,
+    selected BOOLEAN NOT NULL DEFAULT FALSE,
+    raw_json VARCHAR NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (run_id, symbol)
+);
+
+CREATE TABLE IF NOT EXISTS qaoa_optimizer_solution_assets (
+    run_id VARCHAR NOT NULL,
+    as_of_date DATE NOT NULL,
+    symbol VARCHAR NOT NULL,
+    selected BOOLEAN NOT NULL,
+    proposed_weight DOUBLE NOT NULL DEFAULT 0,
+    bit_value INTEGER NOT NULL DEFAULT 0,
+    energy_contribution DOUBLE,
+    rank INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (run_id, symbol)
+);
+
+CREATE TABLE IF NOT EXISTS qaoa_optimizer_solution_summary (
+    run_id VARCHAR PRIMARY KEY,
+    as_of_date DATE NOT NULL,
+    selected_symbols_json VARCHAR NOT NULL,
+    proposed_weights_json VARCHAR NOT NULL,
+    qubo_metadata_json VARCHAR NOT NULL,
+    optimizer_result_json VARCHAR NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ============================================
+-- VLLM Backtest Tables
+-- ============================================
+CREATE TABLE IF NOT EXISTS llm_backtest_runs (
+    run_id VARCHAR PRIMARY KEY,
+    preset VARCHAR,
+    start_date DATE NOT NULL,
+    end_date DATE NOT NULL,
+    status VARCHAR NOT NULL,
+    model VARCHAR,
+    mode VARCHAR NOT NULL,
+    config_json VARCHAR NOT NULL,
+    report_path VARCHAR,
+    error_message VARCHAR,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS llm_backtest_prompt_events (
+    event_id VARCHAR PRIMARY KEY,
+    run_id VARCHAR NOT NULL,
+    as_of_date DATE NOT NULL,
+    trade_date DATE NOT NULL,
+    attempt INTEGER NOT NULL,
+    prompt_json VARCHAR NOT NULL,
+    raw_response VARCHAR,
+    parsed_response_json VARCHAR,
+    validation_status VARCHAR NOT NULL,
+    validation_errors_json VARCHAR NOT NULL,
+    latency_seconds DOUBLE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS llm_backtest_decisions (
+    run_id VARCHAR NOT NULL,
+    trade_date DATE NOT NULL,
+    as_of_date DATE NOT NULL,
+    symbol VARCHAR NOT NULL,
+    action VARCHAR NOT NULL,
+    target_weight DOUBLE NOT NULL,
+    confidence DOUBLE,
+    risk_level VARCHAR,
+    qaoa_selected BOOLEAN NOT NULL DEFAULT FALSE,
+    validation_status VARCHAR NOT NULL,
+    rationale VARCHAR,
+    raw_json VARCHAR NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS llm_backtest_orders (
+    order_id VARCHAR PRIMARY KEY,
+    run_id VARCHAR NOT NULL,
+    trade_date DATE NOT NULL,
+    symbol VARCHAR NOT NULL,
+    action VARCHAR NOT NULL,
+    quantity BIGINT NOT NULL,
+    price DOUBLE NOT NULL,
+    gross_amount DOUBLE NOT NULL,
+    fees DOUBLE NOT NULL,
+    taxes DOUBLE NOT NULL,
+    net_amount DOUBLE NOT NULL,
+    status VARCHAR NOT NULL,
+    reason VARCHAR,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS llm_backtest_positions (
+    run_id VARCHAR NOT NULL,
+    trade_date DATE NOT NULL,
+    symbol VARCHAR NOT NULL,
+    quantity BIGINT NOT NULL,
+    sellable_quantity BIGINT NOT NULL,
+    avg_cost DOUBLE,
+    close_price DOUBLE,
+    market_value DOUBLE NOT NULL,
+    unrealized_pnl DOUBLE NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS llm_backtest_daily_nav (
+    run_id VARCHAR NOT NULL,
+    trade_date DATE NOT NULL,
+    cash DOUBLE NOT NULL,
+    market_value DOUBLE NOT NULL,
+    nav DOUBLE NOT NULL,
+    daily_return DOUBLE,
+    drawdown DOUBLE,
+    exposure DOUBLE,
+    qaoa_agreement DOUBLE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (run_id, trade_date)
+);
+
+CREATE TABLE IF NOT EXISTS llm_backtest_metrics (
+    run_id VARCHAR PRIMARY KEY,
+    total_return DOUBLE,
+    annualized_return DOUBLE,
+    volatility DOUBLE,
+    sharpe DOUBLE,
+    max_drawdown DOUBLE,
+    win_rate DOUBLE,
+    turnover DOUBLE,
+    transaction_cost DOUBLE,
+    invalid_response_rate DOUBLE,
+    rejected_order_count INTEGER,
+    qaoa_agreement_avg DOUBLE,
+    benchmark_json VARCHAR NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- ============================================
 -- Pipeline Runs Table
 -- ============================================
 CREATE TABLE IF NOT EXISTS pipeline_runs (

@@ -1,0 +1,18 @@
+name: bquant-llm-playbooks
+version: 1
+description: Repo-native PLAN/SKILL knowledge for BQuant VLLM market analysis, TA, QAOA, and portfolio decisions.
+skills:
+  - skills/data-health.md
+  - skills/technical-analysis.md
+  - skills/qaoa-portfolio-optimization.md
+  - skills/portfolio-construction.md
+  - skills/risk-management.md
+  - skills/vietnam-market-rules.md
+  - skills/backtest-discipline.md
+  - skills/explanation-and-citation.md
+references:
+  - references/ta-indicator-glossary.md
+  - references/qaoa-qubo-reference.md
+  - references/quant-research-checklist.md
+  - references/prompt-contracts.md
+  - references/evaluation-rubrics.md
